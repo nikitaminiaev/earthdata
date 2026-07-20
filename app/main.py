@@ -55,8 +55,30 @@ if FRONTEND_DIR.exists():
 
 @app.get("/test-tile")
 async def test_tile():
-    return HTMLResponse("""<html><body>
+    return HTMLResponse("""<html><body style="margin:0">
 <img src="/api/osm-tiles/10/619/320.png" onerror="this.alt='ERROR loading tile: '+this.src"/>
+<div id="status">Loading...</div>
+<script>
+var imgs = [
+  '/api/osm-tiles/4/7/3.png',
+  '/api/osm-tiles/4/7/4.png',
+  '/api/osm-tiles/4/8/3.png',
+  '/api/osm-tiles/4/8/4.png',
+  '/api/osm-tiles/5/15/6.png',
+  '/api/osm-tiles/5/15/7.png',
+  '/api/osm-tiles/5/16/6.png',
+  '/api/osm-tiles/5/16/7.png',
+];
+var loaded = 0;
+imgs.forEach(function(url) {
+  var img = new Image();
+  img.onload = function() { loaded++; document.getElementById('status').textContent = loaded + '/' + imgs.length + ' loaded'; };
+  img.onerror = function() { document.getElementById('status').textContent = 'ERROR: ' + url; };
+  img.style.width = '128px';
+  img.style.height = '128px';
+  document.body.appendChild(img);
+});
+</script>
 </body></html>""")
 
 
