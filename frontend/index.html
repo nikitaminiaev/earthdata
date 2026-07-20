@@ -105,17 +105,19 @@ function setBasemap(mode) {
   }
 }
 
-// Check if offline tiles are available
-fetch('/api/health').then(r => r.json()).then(h => {
-  document.title = `Earthdata — ${h.gebco_cog || h.aster_vrt ? 'ONLINE' : 'OFFLINE'}`;
-  if (h.offline_tiles) {
-    document.getElementById('offline-label').textContent = '📡 Offline (ready)';
-    document.getElementById('rb-offline').disabled = false;
-  } else if (h.tile_count >= 0) {
-    const pct = (h.tile_count / h.tile_total_estimated * 100).toFixed(1);
-    document.getElementById('offline-label').textContent = `📡 Offline (${pct}% — ${h.tile_count}/${h.tile_total_estimated})`;
-  }
-});
+// Refresh download progress
+setInterval(() => {
+  fetch('/api/health').then(r => r.json()).then(h => {
+    const el = document.getElementById('offline-label');
+    if (h.offline_tiles && !document.getElementById('rb-offline').disabled) {
+      el.textContent = '📡 Offline (ready)';
+    } else if (h.tile_count >= 0) {
+      const pct = (h.tile_count / h.tile_total_estimated * 100).toFixed(1);
+      el.textContent = `📡 Offline (${pct}% — ${h.tile_count}/${h.tile_total_estimated})`;
+      if (h.tile_count >= h.tile_total_estimated) location.reload();
+    }
+  });
+}, 10000);
 
 // layers
 const elevLayer = L.tileLayer('/api/tiles/{z}/{x}/{y}.png?layer=elevation', {
