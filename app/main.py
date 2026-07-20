@@ -181,13 +181,14 @@ async def query_point(
                 tables = ["gw_tba", "gw_aquifertype", "gw_depthtogw", "gw_salinity"]
                 for t in tables:
                     try:
+                        desc = conn.execute(f"PRAGMA table_info({t})").fetchall()
+                        cols = [d[1] for d in desc if d[1] != "geom"]
+                        text_cols = ",".join(f'"{c}"' for c in cols)
                         row = conn.execute(
-                            f"SELECT * FROM {t} WHERE ST_Intersects(geom, MakePoint(?, ?, 4326)) LIMIT 1",
+                            f"SELECT {text_cols} FROM {t} WHERE ST_Intersects(geom, MakePoint(?, ?, 4326)) LIMIT 1",
                             (lon, lat),
                         ).fetchone()
                         if row:
-                            desc = conn.execute(f"PRAGMA table_info({t})").fetchall()
-                            cols = [d[1] for d in desc]
                             result[f"gw_{t[3:]}"] = dict(zip(cols, row))
                     except Exception:
                         pass
@@ -237,20 +238,21 @@ async def groundwater_at_point(
 ):
     if not Path(VECTORS_DB).exists():
         return {"error": "no groundwater data"}
-
-    if not Path(VECTORS_DB).exists():
-        return {"error": "no groundwater data"}
     result = {}
-    layers = {"gw_tba": "aquifer_type", "gw_aquifertype": "aquifer_detail"}
+    tables = ["gw_tba", "gw_aquifertype", "gw_depthtogw", "gw_salinity"]
     try:
         with spatial_conn(VECTORS_DB) as conn:
-            for table, key in layers.items():
+            for t in tables:
                 try:
-                    row = conn.execute(f"SELECT * FROM {table} WHERE ST_Intersects(geom, MakePoint(?, ?, 4326)) LIMIT 1", (lon, lat)).fetchone()
+                    desc = conn.execute(f"PRAGMA table_info({t})").fetchall()
+                    cols = [d[1] for d in desc if d[1] != "geom"]
+                    text_cols = ",".join(f'"{c}"' for c in cols)
+                    row = conn.execute(
+                        f"SELECT {text_cols} FROM {t} WHERE ST_Intersects(geom, MakePoint(?, ?, 4326)) LIMIT 1",
+                        (lon, lat),
+                    ).fetchone()
                     if row:
-                        desc = conn.execute(f"PRAGMA table_info({table})").fetchall()
-                        cols = [d[1] for d in desc]
-                        result[key] = dict(zip(cols, row))
+                        result[t[3:]] = dict(zip(cols, row))
                 except Exception:
                     pass
     except Exception:
