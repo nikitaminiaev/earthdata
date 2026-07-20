@@ -79,6 +79,9 @@
 </div>
 
 <script>
+console.log('=== Earthdata starting ===');
+console.log('Leaflet L defined:', typeof L !== 'undefined');
+
 const map = L.map('map', {
   center: [55.75, 37.62],
   zoom: 4,
@@ -88,16 +91,23 @@ const map = L.map('map', {
 
 console.log('Map created');
 
+// Direct tile test (bypass Leaflet)
+const testImg = new Image();
+testImg.onload = () => console.log('Direct tile test: OK');
+testImg.onerror = () => console.error('Direct tile test: FAILED');
+testImg.src = '/api/osm-tiles/10/619/320.png';
+
 // base layers
 const osmOnline = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 });
 const osmOffline = L.tileLayer('/api/osm-tiles/{z}/{x}/{y}.png', { maxZoom: 14, minZoom: 2 });
 
-// Start with offline basemap (tiles are ready)
+// Start with offline basemap
 osmOffline.addTo(map);
+console.log('osmOffline.addTo called');
 document.getElementById('rb-offline').checked = true;
 document.getElementById('rb-offline').disabled = false;
 document.getElementById('offline-label').textContent = '📡 Offline (ready)';
-console.log('Offline basemap added');
+console.log('Offline basemap active');
 
 function setBasemap(mode) {
   console.log('setBasemap:', mode);
@@ -108,15 +118,13 @@ function setBasemap(mode) {
     if (map.hasLayer(osmOnline)) map.removeLayer(osmOnline);
     if (!map.hasLayer(osmOffline)) map.addLayer(osmOffline);
   }
-  console.log('Layers after switch:', Object.keys(map._layers || {}).length);
+  console.log('Layers on map:', Object.keys(map._layers).length);
 }
 
-// Tile error debugging
 map.on('tileerror', function(e) {
-  console.error('Tile error:', e.tile.src, e.error);
+  console.error('Tile error:', e.tile.src, e.error || 'unknown');
 });
 
-// Log tile loads
 map.on('tileload', function(e) {
   console.log('Tile loaded:', e.tile.src);
 });

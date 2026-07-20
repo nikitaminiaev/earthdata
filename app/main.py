@@ -51,7 +51,13 @@ if FRONTEND_DIR.exists():
     async def index():
         return HTMLResponse((FRONTEND_DIR / "index.html").read_text())
 
-    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="frontend")
+    app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR), html=False), name="frontend")
+
+@app.get("/test-tile")
+async def test_tile():
+    return HTMLResponse("""<html><body>
+<img src="/api/osm-tiles/10/619/320.png" onerror="this.alt='ERROR loading tile: '+this.src"/>
+</body></html>""")
 
 
 # ---- Tile endpoint (simple PNG tiles from COG/VRT) ----
