@@ -17,3 +17,6 @@ GEOLOGY_DB = str(DATA / "geology" / "earth_geology.sqlite")
 
 # MODIS land cover
 MODIS_DIR = str(ROOT / "07_landcover")
+
+# Offline OSM tiles
+OSM_MBTILES = str(DATA / "tiles" / "osm_offline.mbtiles")

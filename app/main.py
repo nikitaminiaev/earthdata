@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from app.config import GEBCO_PATH, ASTER_VRT, VECTORS_DB, MRDS_GEOJSON, GEOLOGY_DB
+from app.config import GEBCO_PATH, ASTER_VRT, VECTORS_DB, MRDS_GEOJSON, GEOLOGY_DB, OSM_MBTILES
 
 SPATIALITE_PATH = "/usr/lib/aarch64-linux-gnu/mod_spatialite"
 
@@ -102,13 +102,37 @@ def tile_bounds(z, x, y):
     return (b.west, b.south, b.east, b.north)
 
 
-def empty_tile():
+def empty_tile(color=0):
     from PIL import Image
     import io
-    img = Image.new("L", (256, 256), color=0)
+    img = Image.new("L", (256, 256), color=color)
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")
+
+
+# ---- Offline OSM tile endpoint (from MBTiles) ----
+
+@app.get("/api/osm-tiles/{z}/{x}/{y}.png")
+async def osm_tile(z: int, x: int, y: int):
+    if not Path(OSM_MBTILES).exists():
+        return empty_tile(220)
+
+    tms_y = (1 << z) - 1 - y
+
+    try:
+        conn = sqlite3.connect(OSM_MBTILES)
+        conn.execute("PRAGMA query_only = 1")
+        row = conn.execute(
+            "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
+            (z, x, tms_y),
+        ).fetchone()
+        conn.close()
+        if row:
+            return Response(content=row[0], media_type="image/png")
+        return empty_tile(220)
+    except Exception:
+        return empty_tile(220)
 
 
 # ---- Point query: what's at this location? ----
@@ -291,4 +315,5 @@ async def health():
         "vectors_db": Path(VECTORS_DB).exists(),
         "geology_db": Path(GEOLOGY_DB).exists(),
         "mrds_geojson": Path(MRDS_GEOJSON).exists(),
+        "offline_tiles": Path(OSM_MBTILES).exists(),
     }
