@@ -74,7 +74,7 @@
   <label><input type="checkbox" id="chk-gw" disabled onchange="gwLayer.setVisible(this.checked)"><span class="swatch" style="background:#66a"></span>Groundwater (IGRAC)</label>
   <hr style="margin:4px 0"/>
   <div style="font-weight:600;font-size:12px;color:#555;margin-bottom:2px">BASEMAP</div>
-  <label><input type="radio" name="basemap" checked onchange="setBasemap('online')"><span style="color:#888">🌐 Online</span></label>
+  <label><input type="radio" name="basemap" id="rb-online" onchange="setBasemap('online')"><span style="color:#888">🌐 Online</span></label>
   <label><input type="radio" name="basemap" onchange="setBasemap('offline')" id="rb-offline"><span style="color:#888" id="offline-label">📡 Offline (not ready)</span></label>
 </div>
 
@@ -86,11 +86,10 @@ const map = L.map('map', {
   minZoom: 2,
 });
 
-// base map layers
+// base map layers — start with offline if ready, else online
 const osmOnline = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
-}).addTo(map);
-
+});
 const osmOffline = L.tileLayer('/api/osm-tiles/{z}/{x}/{y}.png', {
   maxZoom: 14, minZoom: 2,
 });
@@ -104,6 +103,26 @@ function setBasemap(mode) {
     if (!map.hasLayer(osmOffline)) map.addLayer(osmOffline);
   }
 }
+
+// Check availability and start with correct basemap
+let startedWithOffline = false;
+fetch('/api/health').then(r => r.json()).then(h => {
+  if (h.offline_tiles && h.tile_count >= h.tile_total_estimated) {
+    document.getElementById('offline-label').textContent = '📡 Offline (ready)';
+    const rb = document.getElementById('rb-offline');
+    rb.disabled = false;
+    rb.checked = true;
+    // Default to offline basemap
+    document.getElementById('rb-online').checked = false;
+    setBasemap('offline');
+    startedWithOffline = true;
+  }
+}).finally(() => {
+  if (!startedWithOffline) {
+    osmOnline.addTo(map);
+    document.getElementById('rb-online').checked = true;
+  }
+});
 
 // Refresh download progress
 setInterval(() => {

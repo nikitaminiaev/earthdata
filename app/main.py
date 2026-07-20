@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import logging
 from pathlib import Path
 from contextlib import contextmanager
 from fastapi import FastAPI, Query, HTTPException
@@ -7,9 +8,20 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from app.config import GEBCO_PATH, ASTER_VRT, VECTORS_DB, MRDS_GEOJSON, GEOLOGY_DB, OSM_MBTILES
 
+logger = logging.getLogger("earthdata")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
 SPATIALITE_PATH = "/usr/lib/aarch64-linux-gnu/mod_spatialite"
 
 app = FastAPI(title="Earthdata Server")
+
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @contextmanager
@@ -140,8 +152,11 @@ async def osm_tile(z: int, x: int, y: int):
         conn.close()
         if row:
             return Response(content=row[0], media_type="image/png")
-        return empty_tile(220)
-    except Exception:
+        else:
+            logger.warning("osm_tile not in DB: z=%d x=%d y=%d tms_y=%d", z, x, y, tms_y)
+            return empty_tile(220)
+    except Exception as e:
+        logger.error("osm_tile error: %s", e)
         return empty_tile(220)
 
 
