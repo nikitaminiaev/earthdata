@@ -327,5 +327,5 @@ async def health():
         "mrds_geojson": Path(MRDS_GEOJSON).exists(),
         "offline_tiles": Path(OSM_MBTILES).exists(),
         "tile_count": tile_count(),
-        "tile_total_estimated": 141149,
+        "tile_total_estimated": 141171,
     }
