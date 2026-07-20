@@ -37,7 +37,7 @@ def tile_bounds(lon_min, lat_min, lon_max, lat_max, z):
     return max(0, x_min), min((1 << z) - 1, x_max), max(0, y_min), min((1 << z) - 1, y_max)
 
 
-def download_tile(z, x, y, out_db, lock, stats):
+def download_tile(z, x, y, out_db_path, lock, stats):
     """Download a single OSM tile and insert into MBTiles."""
     url = f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
     tms_y = osm_to_tms(y, z)
@@ -47,32 +47,32 @@ def download_tile(z, x, y, out_db, lock, stats):
         resp = urlopen(req, timeout=15)
         data = resp.read()
         if len(data) < 100:
-            return  # empty tile
+            return
 
-        with lock:
-            try:
-                out_db.execute(
-                    "INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)",
-                    (z, x, tms_y, data),
-                )
-                out_db.commit()
-            except Exception:
-                pass
-
-        with lock:
-            stats["downloaded"] += 1
-            if stats["downloaded"] % 100 == 0:
-                pct = stats["downloaded"] / stats["total"] * 100 if stats["total"] else 0
-                elapsed = time.time() - stats["start"]
-                rate = stats["downloaded"] / elapsed if elapsed > 0 else 0
-                remaining = (stats["total"] - stats["downloaded"]) / rate if rate > 0 else 0
-                print(f"  [{stats['downloaded']}/{stats['total']}] {pct:.1f}% | {rate:.1f} tiles/s | ETA {remaining:.0f}s")
-
+        conn = sqlite3.connect(str(out_db_path))
+        conn.execute("PRAGMA synchronous = OFF")
+        conn.execute("PRAGMA journal_mode = MEMORY")
+        conn.execute(
+            "INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)",
+            (z, x, tms_y, data),
+        )
+        conn.commit()
+        conn.close()
     except Exception as e:
         with lock:
             stats["errors"] += 1
             if stats["errors"] <= 5:
                 print(f"  Error {url}: {e}")
+        return
+
+    with lock:
+        stats["downloaded"] += 1
+        if stats["downloaded"] % 100 == 0:
+            pct = stats["downloaded"] / stats["total"] * 100 if stats["total"] else 0
+            elapsed = time.time() - stats["start"]
+            rate = stats["downloaded"] / elapsed if elapsed > 0 else 0
+            remaining = (stats["total"] - stats["downloaded"]) / rate if rate > 0 else 0
+            print(f"  [{stats['downloaded']}/{stats['total']}] {pct:.1f}% | {rate:.1f} tiles/s | ETA {remaining:.0f}s")
 
 
 def main():
@@ -115,10 +115,8 @@ def main():
     est_size_mb = total_tiles * 0.015  # ~15 KB per tile
     print(f"Estimated size: {est_size_mb:.0f} MB")
 
-    # Create MBTiles DB
+    # create MBTiles DB
     conn = sqlite3.connect(str(out_db_path))
-    conn.execute("PRAGMA synchronous = OFF")
-    conn.execute("PRAGMA journal_mode = MEMORY")
     conn.execute("CREATE TABLE IF NOT EXISTS tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tiles ON tiles(zoom_level, tile_column, tile_row)")
     conn.execute("CREATE TABLE IF NOT EXISTS metadata (name TEXT, value TEXT)")
@@ -154,7 +152,7 @@ def main():
     lock = threading.Lock()
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = [pool.submit(download_tile, z, x, y, conn, lock, stats) for z, x, y in to_download]
+        futures = [pool.submit(download_tile, z, x, y, out_db_path, lock, stats) for z, x, y in to_download]
         for f in as_completed(futures):
             pass
 
