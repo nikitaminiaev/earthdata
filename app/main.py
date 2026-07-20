@@ -102,6 +102,16 @@ def tile_bounds(z, x, y):
     return (b.west, b.south, b.east, b.north)
 
 
+def tile_count():
+    try:
+        conn = sqlite3.connect(OSM_MBTILES)
+        count = conn.execute("SELECT COUNT(*) FROM tiles").fetchone()[0]
+        conn.close()
+        return count
+    except Exception:
+        return -1
+
+
 def empty_tile(color=0):
     from PIL import Image
     import io
@@ -316,4 +326,6 @@ async def health():
         "geology_db": Path(GEOLOGY_DB).exists(),
         "mrds_geojson": Path(MRDS_GEOJSON).exists(),
         "offline_tiles": Path(OSM_MBTILES).exists(),
+        "tile_count": tile_count(),
+        "tile_total_estimated": 141171,
     }
