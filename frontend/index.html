@@ -109,9 +109,30 @@ L.Layer.include({
   }
 });
 
+const GEOL_COLORS = {
+  'CEN': { fill: '#f0e68c', stroke: '#b8a84c', label: 'Cenozoic' },
+  'MES': { fill: '#8fbc8f', stroke: '#5a8a5a', label: 'Mesozoic' },
+  'PAL': { fill: '#87ceeb', stroke: '#4a8ebd', label: 'Paleozoic' },
+  'PCU': { fill: '#dda0dd', stroke: '#9b59b6', label: 'Precambrian' },
+  'PRO': { fill: '#ba90c6', stroke: '#7b4f96', label: 'Proterozoic' },
+  'ARC': { fill: '#cd5c5c', stroke: '#8b3a3a', label: 'Archean' },
+  'REC': { fill: '#f5f5dc', stroke: '#b8b886', label: 'Recent' },
+};
+const GEOL_DEFAULT = { fill: '#ccc', stroke: '#999', label: 'Unknown' };
+
 // Geology
 const geolLayer = L.geoJSON(null, {
-  style: { color: '#888', weight: 1, fillOpacity: 0.15 },
+  style: (f) => {
+    const a = f.properties?.AGERA || '';
+    const c = GEOL_COLORS[a] || GEOL_DEFAULT;
+    return { color: c.stroke, fillColor: c.fill, weight: 1, fillOpacity: 0.35 };
+  },
+  onEachFeature: (f, layer) => {
+    const p = f.properties || {};
+    const era = (GEOL_COLORS[p.AGERA] || GEOL_DEFAULT).label;
+    const rock = p.RXTP || '';
+    layer.bindPopup(`<b>${era}</b><br>${rock}${p.NAME ? '<br>' + p.NAME : ''}`);
+  },
 });
 fetch('/api/geology-layer').then(r => r.json()).then(fc => {
   geolLayer.addData(fc);
