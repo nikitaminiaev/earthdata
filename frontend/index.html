@@ -58,8 +58,9 @@
   <h3>Point info</h3>
   <div class="row"><span class="label">Coordinates</span><span class="value" id="coord-val">—</span></div>
   <div class="row"><span class="label">Elevation</span><span class="value" id="elev-val">—</span></div>
-  <div class="row"><span class="label">Rock type</span><span class="value" id="geol-val">—</span></div>
+    <div class="row"><span class="label">Rock type</span><span class="value" id="geol-val">—</span></div>
   <div class="row"><span class="label">Age/Era</span><span class="value" id="rock-val">—</span></div>
+  <div class="row"><span class="label">Groundwater</span><span class="value" id="gw-val" style="font-weight:400;font-size:11px">—</span></div>
   <hr style="margin:6px 0"/>
   <div style="font-weight:600;margin-bottom:4px">Nearby deposits:</div>
   <div id="deposits-list"></div>
@@ -141,7 +142,16 @@ fetch('/api/geology-layer').then(r => r.json()).then(fc => {
 
 // Groundwater
 const gwLayer = L.geoJSON(null, {
-  style: { color: '#66a', weight: 1, fillOpacity: 0.12 },
+  style: (f) => {
+    const t = f.properties?.aquifertyp || f.properties?.category || '';
+    const c = t.includes('confined') ? '#4488cc' : t.includes('unconfined') ? '#66aadd' : '#8899bb';
+    return { color: c, fillColor: c, weight: 1, fillOpacity: 0.15 };
+  },
+  onEachFeature: (f, layer) => {
+    const p = f.properties || {};
+    const info = Object.entries(p).slice(0, 5).map(([k, v]) => v ? `${k}: ${v}` : '').filter(Boolean).join('<br>');
+    layer.bindPopup(info || 'Groundwater aquifer');
+  },
 });
 fetch('/api/gw-aquifertype').then(r => r.json()).then(fc => {
   gwLayer.addData(fc);
@@ -168,6 +178,8 @@ map.on('click', async (e) => {
     document.getElementById('elev-val').textContent = data.elevation_m != null ? `${data.elevation_m.toFixed(1)} m` : '—';
     document.getElementById('geol-val').textContent = data.geology?.rock_type || '—';
     document.getElementById('rock-val').textContent = data.geology?.age_era || '—';
+    const gw = data.gw_tba || data.gw_aquifertype || {};
+    document.getElementById('gw-val').textContent = gw.aquifer || gw.aquifertyp || gw.category || '—';
 
     const dl = document.getElementById('deposits-list');
     dl.innerHTML = '';

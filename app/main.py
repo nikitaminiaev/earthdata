@@ -174,6 +174,26 @@ async def query_point(
     else:
         result["geology"] = None
 
+    # Groundwater at point
+    if Path(VECTORS_DB).exists():
+        try:
+            with spatial_conn(VECTORS_DB) as conn:
+                tables = ["gw_tba", "gw_aquifertype", "gw_depthtogw", "gw_salinity"]
+                for t in tables:
+                    try:
+                        row = conn.execute(
+                            f"SELECT * FROM {t} WHERE ST_Intersects(geom, MakePoint(?, ?, 4326)) LIMIT 1",
+                            (lon, lat),
+                        ).fetchone()
+                        if row:
+                            desc = conn.execute(f"PRAGMA table_info({t})").fetchall()
+                            cols = [d[1] for d in desc]
+                            result[f"gw_{t[3:]}"] = dict(zip(cols, row))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     return result
 
 
