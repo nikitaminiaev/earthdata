@@ -10,15 +10,25 @@ Presets:
   --preset world     Whole world at z2-8 only (small)
 """
 
-import argparse, math, os, sys, time, json, sqlite3
+import argparse, math, os, sys, time, json, sqlite3, hashlib
 from pathlib import Path
 from urllib.request import urlopen, Request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 
-USER_AGENT = "EarthdataOffline/1.0 (educational; offline map cache project)"
-DELAY = 0.1  # seconds between requests per thread
+# Thread-local SQLite connections
+_tls = threading.local()
+
+USER_AGENT = "curl/8.0"  # OSM blocks browser-like UAs, curl works
+DELAY = 0.05  # seconds between requests per thread
 MAX_WORKERS = 4
+MAX_RETRIES = 2
+
+# Known blocked/placeholder tile MD5 hashes (OSM 403 response)
+BLOCKED_HASHES = {
+    "c069a15b2cc2d6b6f527ad09eb93c61a",  # OSM "Access blocked" tile (no UA)
+    "0ca3dfb6df8f39994a6a2e69127dbf47",  # OSM blocked tile (browser UA)
+}
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data" / "tiles"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -37,37 +47,55 @@ def tile_bounds(lon_min, lat_min, lon_max, lat_max, z):
     return max(0, x_min), min((1 << z) - 1, x_max), max(0, y_min), min((1 << z) - 1, y_max)
 
 
-def download_tile(z, x, y, out_db_path, lock, stats):
-    """Download a single OSM tile and insert into MBTiles."""
+def is_blocked_tile(data: bytes) -> bool:
+    return hashlib.md5(data).hexdigest() in BLOCKED_HASHES
+
+
+def get_db_conn(db_path: str):
+    if not hasattr(_tls, "conn"):
+        _tls.conn = sqlite3.connect(str(db_path))
+        _tls.conn.execute("PRAGMA synchronous = OFF")
+        _tls.conn.execute("PRAGMA journal_mode = MEMORY")
+        _tls.conn.execute("PRAGMA cache_size = -64000")
+    return _tls.conn
+
+
+def download_tile(z, x, y, db_path, lock, stats):
     url = f"https://tile.openstreetmap.org/{z}/{x}/{y}.png"
     tms_y = osm_to_tms(y, z)
 
-    req = Request(url, headers={"User-Agent": USER_AGENT})
-    try:
-        resp = urlopen(req, timeout=15)
-        data = resp.read()
-        if len(data) < 100:
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            req = Request(url, headers={"User-Agent": USER_AGENT})
+            resp = urlopen(req, timeout=15)
+            data = resp.read()
+            if len(data) < 50:
+                raise ValueError(f"Tile too small ({len(data)} bytes)")
+            if is_blocked_tile(data):
+                raise ValueError(f"Tile blocked ({hashlib.md5(data).hexdigest()[:12]}...)")
+            break
+        except Exception as e:
+            if attempt < MAX_RETRIES:
+                time.sleep(DELAY * 3)
+                continue
+            with lock:
+                stats["errors"] += 1
+                if stats["errors"] <= 5:
+                    print(f"  Error {url}: {e}")
             return
 
-        conn = sqlite3.connect(str(out_db_path))
-        conn.execute("PRAGMA synchronous = OFF")
-        conn.execute("PRAGMA journal_mode = MEMORY")
-        conn.execute(
-            "INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)",
-            (z, x, tms_y, data),
-        )
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        with lock:
-            stats["errors"] += 1
-            if stats["errors"] <= 5:
-                print(f"  Error {url}: {e}")
-        return
+    time.sleep(DELAY)
+
+    conn = get_db_conn(db_path)
+    conn.execute(
+        "INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?)",
+        (z, x, tms_y, data),
+    )
+    conn.commit()
 
     with lock:
         stats["downloaded"] += 1
-        if stats["downloaded"] % 100 == 0:
+        if stats["downloaded"] % 200 == 0:
             pct = stats["downloaded"] / stats["total"] * 100 if stats["total"] else 0
             elapsed = time.time() - stats["start"]
             rate = stats["downloaded"] / elapsed if elapsed > 0 else 0
@@ -127,26 +155,43 @@ def main():
     conn.execute("INSERT OR REPLACE INTO metadata VALUES ('description', 'OSM tiles for offline use')")
     conn.commit()
 
-    # check existing tiles
+    # filter out already downloaded with valid content
     existing = conn.execute("SELECT COUNT(*) FROM tiles").fetchone()[0]
     print(f"Already in DB: {existing} tiles")
-    if existing >= total_tiles:
-        print("Already complete!")
-        conn.close()
-        return
+    print("Checking existing tiles for blocked content...")
 
-    # filter out already downloaded
+    blocked_lookup = {}
+    batch_size = 10000
+    offset = 0
+    while True:
+        rows = conn.execute(
+            "SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles LIMIT ? OFFSET ?",
+            (batch_size, offset),
+        ).fetchall()
+        if not rows:
+            break
+        for z, x, tms_y, data in rows:
+            if is_blocked_tile(data):
+                blocked_lookup[(z, x, tms_y)] = True
+        offset += len(rows)
+        print(f"  Checked {offset}/{existing}...")
+
     to_download = []
+    valid_skip = 0
     for z, x, y in tile_list:
         tms_y = osm_to_tms(y, z)
-        exists = conn.execute(
+        if (z, x, tms_y) in blocked_lookup:
+            to_download.append((z, x, y))
+        elif conn.execute(
             "SELECT 1 FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
             (z, x, tms_y),
-        ).fetchone()
-        if not exists:
+        ).fetchone() is None:
             to_download.append((z, x, y))
+        else:
+            valid_skip += 1
 
-    print(f"To download: {len(to_download)} (skipping {total_tiles - len(to_download)} existing)")
+    recheck_count = len(to_download)
+    print(f"To download: {len(to_download)} ({valid_skip} valid cached, {recheck_count} to re-download)")
 
     stats = {"downloaded": 0, "errors": 0, "total": len(to_download), "start": time.time()}
     lock = threading.Lock()

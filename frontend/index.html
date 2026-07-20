@@ -70,6 +70,10 @@
   <div style="font-weight:600;margin-bottom:4px;font-size:12px;color:#555">LAYERS</div>
   <label><input type="checkbox" checked onchange="elevLayer.setVisible(this.checked)"><span class="swatch" style="background:#b87"></span>Relief (ASTER/GEBCO)</label>
   <label><input type="checkbox" checked onchange="mrdsLayer.setVisible(this.checked)"><span class="swatch" style="background:#c44"></span>Deposits (MRDS)</label>
+  <label><input type="checkbox" id="chk-osm-mining" onchange="osmMiningLayer.setVisible(this.checked);toggleMiningLegend(this.checked)"><span class="swatch" style="background:#e80"></span>Quarries (OSM)</label>
+  <div id="mining-legend" style="display:none;margin-top:4px;font-size:11px;padding:4px 6px;background:#f8f8f8;border-radius:4px;max-height:150px;overflow-y:auto">
+    <div style="font-weight:600;margin-bottom:2px">Resources:</div>
+  </div>
   <label><input type="checkbox" id="chk-geol" disabled onchange="geolLayer.setVisible(this.checked)"><span class="swatch" style="background:#888"></span>Geology (USGS)</label>
   <label><input type="checkbox" id="chk-gw" disabled onchange="gwLayer.setVisible(this.checked)"><span class="swatch" style="background:#66a"></span>Groundwater (IGRAC)</label>
   <hr style="margin:4px 0"/>
@@ -155,6 +159,38 @@ const mrdsLayer = L.geoJSON(null, {
   },
 }).addTo(map);
 
+const RESOURCE_COLORS = {
+  'gold': '#ffd700', 'silver': '#c0c0c0', 'platinum': '#e5e4e2',
+  'copper': '#b87333', 'iron': '#8b4513',
+  'coal': '#333', 'peat': '#8b6914',
+  'sand': '#f5deb3', 'gravel': '#d2b48c',
+  'limestone': '#d3d3d3', 'clay': '#cd853f',
+  'aggregate': '#a9a9a9', 'stone': '#a0a0a0', 'dimension_stone': '#b0a0c0',
+  'manganese': '#778899', 'chromium': '#708090',
+  'tin': '#dcdcdc', 'tungsten': '#696969',
+};
+const RESOURCE_DEFAULT = '#e80';
+
+function resourceColor(resource) {
+  if (!resource) return RESOURCE_DEFAULT;
+  return RESOURCE_COLORS[resource.toLowerCase()] || RESOURCE_DEFAULT;
+}
+
+const osmMiningLayer = L.geoJSON(null, {
+  pointToLayer: (f, latlng) => {
+    const color = resourceColor(f.properties?.resource);
+    return L.circleMarker(latlng, {
+      radius: 5, fillColor: color, color: color, weight: 1, opacity: 0.6, fillOpacity: 0.5,
+    });
+  },
+  onEachFeature: (f, layer) => {
+    const p = f.properties || {};
+    const res = p.resource || 'quarry';
+    const info = [p.name, res].filter(Boolean).join('<br>');
+    layer.bindPopup(info || 'Quarry');
+  },
+});
+
 // layer visibility helper
 L.Layer.include({
   setVisible(on) {
@@ -217,6 +253,28 @@ fetch('/api/health').then(r => r.json()).then(h => {
 
 fetch('/api/mrds-layer').then(r => r.json()).then(fc => {
   mrdsLayer.addData(fc);
+}).catch(() => {});
+
+function toggleMiningLegend(show) {
+  document.getElementById('mining-legend').style.display = show ? 'block' : 'none';
+}
+
+function buildMiningLegend(fc) {
+  const seen = new Set();
+  const legend = document.getElementById('mining-legend');
+  fc.features.forEach(f => {
+    const r = (f.properties?.resource || '').toLowerCase();
+    if (!r || seen.has(r)) return;
+    seen.add(r);
+    const c = resourceColor(r);
+    legend.innerHTML += `<div><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c};margin-right:4px"></span>${r}</div>`;
+  });
+}
+
+fetch('/api/osm-mining').then(r => r.json()).then(fc => {
+  osmMiningLayer.addData(fc);
+  buildMiningLegend(fc);
+  document.getElementById('chk-osm-mining').checked = true;
 }).catch(() => {});
 
 // Click query

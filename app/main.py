@@ -55,11 +55,25 @@ if FRONTEND_DIR.exists():
 
 @app.get("/test-tile")
 async def test_tile():
-    return HTMLResponse("""<html><body style="margin:0">
-<img src="/api/osm-tiles/10/619/320.png" onerror="this.alt='ERROR loading tile: '+this.src"/>
-<div id="status">Loading...</div>
+    import base64, sqlite3
+    conn = sqlite3.connect(OSM_MBTILES)
+    tiles = []
+    for z, x, y_xyz in [(10, 619, 320), (4, 7, 3), (4, 7, 4), (4, 8, 3), (4, 8, 4), (5, 15, 6), (5, 15, 7), (5, 16, 6), (5, 16, 7)]:
+        tms_y = (1 << z) - 1 - y_xyz
+        data = conn.execute("SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?", (z, x, tms_y)).fetchone()
+        if data:
+            tiles.append((z, x, y_xyz, base64.b64encode(data[0]).decode()))
+    conn.close()
+    base64_tiles = ""
+    for z, x, y, b64 in tiles:
+        base64_tiles += '<div style="display:inline-block;margin:4px;text-align:center"><b>z%d x%d y%d</b><br><img src="data:image/png;base64,%s" width="128" height="128"></div>' % (z, x, y, b64)
+    return HTMLResponse("""<html><body style="font-family:sans-serif">
+<h2>Base64 inline tiles (no HTTP)</h2>
+""" + base64_tiles + """
+<hr><h2>Regular HTTP tiles</h2>
+<div id="status">Status: waiting...</div>
 <script>
-var imgs = [
+var urls = [
   '/api/osm-tiles/4/7/3.png',
   '/api/osm-tiles/4/7/4.png',
   '/api/osm-tiles/4/8/3.png',
@@ -69,13 +83,14 @@ var imgs = [
   '/api/osm-tiles/5/16/6.png',
   '/api/osm-tiles/5/16/7.png',
 ];
-var loaded = 0;
-imgs.forEach(function(url) {
+var status = document.getElementById('status');
+urls.forEach(function(url) {
   var img = new Image();
-  img.onload = function() { loaded++; document.getElementById('status').textContent = loaded + '/' + imgs.length + ' loaded'; };
-  img.onerror = function() { document.getElementById('status').textContent = 'ERROR: ' + url; };
   img.style.width = '128px';
   img.style.height = '128px';
+  img.style.border = '1px solid #ccc';
+  img.onload = function() { status.textContent = 'OK: ' + url; };
+  img.onerror = function() { status.textContent = 'ERROR: ' + url + ' - check console (F12)'; };
   document.body.appendChild(img);
 });
 </script>
@@ -355,6 +370,7 @@ app.get("/api/gw-aquifertype")(serve_geojson("gw_aquifertype"))
 app.get("/api/gw-depth")(serve_geojson("gw_depthtogw"))
 app.get("/api/gw-salinity")(serve_geojson("gw_salinity"))
 app.get("/api/gw-tba")(serve_geojson("gw_tba"))
+app.get("/api/osm-mining")(serve_geojson("osm_mining"))
 
 
 # ---- Health check ----
