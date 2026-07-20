@@ -26,46 +26,51 @@
     background:white; padding:6px 12px; border-radius:6px;
     box-shadow:0 2px 6px rgba(0,0,0,0.3); display:flex; gap:8px;
   }
-  #search-box input { border:1px solid #ccc; border-radius:4px; padding:6px 10px; width:220px; font-size:13px; }
+  #search-box input { border:1px solid #ccc; border-radius:4px; padding:6px 10px; width:260px; font-size:13px; }
   #search-box button { background:#4a7; color:white; border:none; border-radius:4px; padding:6px 14px; cursor:pointer; font-size:13px; }
   #search-results {
     position:absolute; top:55px; left:50%; transform:translateX(-50%); z-index:1000;
     background:white; border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,0.3);
-    max-height:300px; overflow-y:auto; width:400px; display:none;
+    max-height:300px; overflow-y:auto; width:420px; display:none;
   }
   #search-results .item { padding:8px 12px; border-bottom:1px solid #eee; cursor:pointer; font-size:13px; }
   #search-results .item:hover { background:#e8f5e9; }
-  .legend {
+  .controls {
     position:absolute; bottom:30px; left:10px; z-index:1000;
-    background:rgba(255,255,255,0.9); padding:8px 12px; border-radius:6px; font-size:12px;
+    background:rgba(255,255,255,0.92); padding:10px 14px; border-radius:8px;
+    box-shadow:0 2px 8px rgba(0,0,0,0.25); font-size:13px; min-width:190px;
   }
+  .controls label { display:flex; align-items:center; gap:8px; padding:3px 0; cursor:pointer; }
+  .controls input[type=checkbox] { width:16px; height:16px; cursor:pointer; accent-color:#4a7; }
+  .controls .swatch { display:inline-block; width:12px; height:12px; border-radius:50%; flex-shrink:0; }
 </style>
 </head>
 <body>
 <div id="map"></div>
 
 <div id="search-box">
-  <input id="search-input" placeholder="Поиск ископаемого (золото, уголь, ...)" onkeydown="if(event.key==='Enter') searchMineral()"/>
-  <button onclick="searchMineral()">Найти</button>
+  <input id="search-input" placeholder="Search mineral (gold, coal, uranium, copper, iron...)" onkeydown="if(event.key==='Enter') searchMineral()"/>
+  <button onclick="searchMineral()">Search</button>
 </div>
 <div id="search-results"></div>
 
 <div id="info-panel">
-  <h3>Информация о точке</h3>
-  <div id="info-coords" class="row"><span class="label">Координаты</span><span class="value" id="coord-val">—</span></div>
-  <div id="info-elev" class="row"><span class="label">Высота</span><span class="value" id="elev-val">—</span></div>
-  <div id="info-geol" class="row"><span class="label">Геология</span><span class="value" id="geol-val">—</span></div>
-  <div id="info-rock" class="row"><span class="label">Тип породы</span><span class="value" id="rock-val">—</span></div>
+  <h3>Point info</h3>
+  <div class="row"><span class="label">Coordinates</span><span class="value" id="coord-val">—</span></div>
+  <div class="row"><span class="label">Elevation</span><span class="value" id="elev-val">—</span></div>
+  <div class="row"><span class="label">Rock type</span><span class="value" id="geol-val">—</span></div>
+  <div class="row"><span class="label">Age/Era</span><span class="value" id="rock-val">—</span></div>
   <hr style="margin:6px 0"/>
-  <div style="font-weight:600;margin-bottom:4px">Месторождения рядом:</div>
+  <div style="font-weight:600;margin-bottom:4px">Nearby deposits:</div>
   <div id="deposits-list"></div>
 </div>
 
-<div class="legend">
-  <div>🟤 Рельеф (ASTER/GEBCO)</div>
-  <div style="color:#c44">🔴 Месторождения (MRDS)</div>
-  <div style="color:#66a">🔵 Водные горизонты (IGRAC)</div>
-  <div style="color:#888">⚪ Геология (USGS)</div>
+<div class="controls">
+  <div style="font-weight:600;margin-bottom:4px;font-size:12px;color:#555">LAYERS</div>
+  <label><input type="checkbox" checked onchange="elevLayer.setVisible(this.checked)"><span class="swatch" style="background:#b87"></span>Relief (ASTER/GEBCO)</label>
+  <label><input type="checkbox" checked onchange="mrdsLayer.setVisible(this.checked)"><span class="swatch" style="background:#c44"></span>Deposits (MRDS)</label>
+  <label><input type="checkbox" onchange="geolLayer.setVisible(this.checked)"><span class="swatch" style="background:#888"></span>Geology (USGS)</label>
+  <label><input type="checkbox" onchange="gwLayer.setVisible(this.checked)"><span class="swatch" style="background:#66a"></span>Groundwater (IGRAC)</label>
 </div>
 
 <script>
@@ -81,49 +86,54 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
   maxZoom: 19,
 }).addTo(map);
 
-// Elevation tiles
+// layers
 const elevLayer = L.tileLayer('/api/tiles/{z}/{x}/{y}.png?layer=elevation', {
-  attribution: 'ASTER / GEBCO',
-  maxZoom: 14,
-  opacity: 0.6,
+  maxZoom: 14, opacity: 0.55,
 }).addTo(map);
 
-// MRDS points
 const mrdsLayer = L.geoJSON(null, {
   pointToLayer: (f, latlng) => L.circleMarker(latlng, {
     radius: 4, fillColor: '#c44', color: '#c44', weight: 1, opacity: 0.6, fillOpacity: 0.5,
   }),
   onEachFeature: (f, layer) => {
     const p = f.properties || {};
-    const info = `${p.name || '?'}<br>${p.c1 || ''} ${p.c2 || ''}<br>${p.ct || ''}`;
-    layer.bindPopup(info);
+    layer.bindPopup(`${p.name || '?'}<br>${p.c1 || ''} ${p.c2 || ''}<br>${p.ct || ''}`);
   },
-});
+}).addTo(map);
 
-fetch('/api/health').then(r => r.json()).then(h => {
-  document.title = `Earthdata — ${h.gebco_cog || h.aster_vrt ? '🟢' : '🔴'} Сервер готов`;
-});
-
-// Load MRDS
-fetch('/api/mrds-layer').then(r => r.json()).then(fc => {
-  mrdsLayer.addData(fc);
-  map.addLayer(mrdsLayer);
-}).catch(() => {});
-
-// Geology - try to load
 const geolLayer = L.geoJSON(null, {
   style: { color: '#888', weight: 1, fillOpacity: 0.15 },
 });
 
-// Click to query
+const gwLayer = L.geoJSON(null, {
+  style: { color: '#66a', weight: 1, fillOpacity: 0.12 },
+});
+
+fetch('/api/health').then(r => r.json()).then(h => {
+  document.title = `Earthdata — ${h.gebco_cog || h.aster_vrt ? 'ONLINE' : 'OFFLINE'}`;
+});
+
+fetch('/api/mrds-layer').then(r => r.json()).then(fc => {
+  mrdsLayer.addData(fc);
+}).catch(() => {});
+
+// layer visibility helper
+L.Layer.include({
+  setVisible(on) {
+    if (on) this.addTo(map); else this.remove();
+  }
+});
+
+// Click query
 map.on('click', async (e) => {
   const { lat, lng } = e.latlng;
   document.getElementById('coord-val').textContent = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+  document.getElementById('info-panel').style.display = 'block';
 
   try {
     const res = await fetch(`/api/query?lat=${lat}&lon=${lng}`);
     const data = await res.json();
-    document.getElementById('elev-val').textContent = data.elevation_m != null ? `${data.elevation_m.toFixed(1)} м` : '—';
+    document.getElementById('elev-val').textContent = data.elevation_m != null ? `${data.elevation_m.toFixed(1)} m` : '—';
     document.getElementById('geol-val').textContent = data.geology?.rock_type || '—';
     document.getElementById('rock-val').textContent = data.geology?.age_era || '—';
 
@@ -132,16 +142,16 @@ map.on('click', async (e) => {
     (data.mineral_deposits || []).slice(0, 10).forEach(d => {
       dl.innerHTML += `<div class="deposit"><b>${d.name || '?'}</b> — ${d.c1 || d.ct || ''} <span style="color:#999;font-size:11px">${d.dist_deg ? d.dist_deg.toFixed(2) + '°' : ''}</span></div>`;
     });
-    if ((data.mineral_deposits || []).length === 0) dl.innerHTML = '<div style="color:#999">Нет рядом</div>';
+    if ((data.mineral_deposits || []).length === 0) dl.innerHTML = '<div style="color:#999">None nearby</div>';
   } catch(e) {
-    document.getElementById('elev-val').textContent = 'ошибка';
+    document.getElementById('elev-val').textContent = 'error';
   }
-  document.getElementById('info-panel').style.display = 'block';
 });
 
 document.addEventListener('click', (e) => {
-  if (!e.target.closest('#info-panel') && !e.target.closest('#map')) {
+  if (!e.target.closest('#info-panel') && !e.target.closest('#map') && !e.target.closest('.controls') && !e.target.closest('#search-results')) {
     document.getElementById('info-panel').style.display = 'none';
+    document.getElementById('search-results').style.display = 'none';
   }
 });
 
@@ -154,11 +164,11 @@ async function searchMineral() {
   div.innerHTML = '';
   div.style.display = 'block';
   if (data.count === 0) {
-    div.innerHTML = '<div style="padding:12px;color:#999">Ничего не найдено</div>';
+    div.innerHTML = '<div style="padding:12px;color:#999">Nothing found</div>';
     return;
   }
   data.results.forEach(r => {
-    div.innerHTML += `<div class="item" onclick="map.setView([${r.lat},${r.lon}], 10);div.style.display='none'"><b>${r.name || '?'}</b> — ${r.commodity} <span style="color:#999">${r.country || ''}</span></div>`;
+    div.innerHTML += `<div class="item" onclick="map.setView([${r.lat},${r.lon}], 10);document.getElementById('search-results').style.display='none'"><b>${r.name || '?'}</b> — ${r.commodity} <span style="color:#999">${r.country || ''}</span></div>`;
   });
 }
 </script>
