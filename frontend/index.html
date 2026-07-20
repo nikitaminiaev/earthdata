@@ -4,8 +4,8 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>Earthdata — Геологическая карта</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<link rel="stylesheet" href="/static/leaflet/leaflet.css"/>
+<script src="/static/leaflet/leaflet.js"></script>
 <style>
   body, html { margin:0; padding:0; height:100%; font-family:sans-serif; }
   #map { height:100vh; width:100vw; }
@@ -86,15 +86,21 @@ const map = L.map('map', {
   minZoom: 2,
 });
 
-// base map layers — start with offline if ready, else online
-const osmOnline = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  maxZoom: 19,
-});
-const osmOffline = L.tileLayer('/api/osm-tiles/{z}/{x}/{y}.png', {
-  maxZoom: 14, minZoom: 2,
-});
+console.log('Map created');
+
+// base layers
+const osmOnline = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 });
+const osmOffline = L.tileLayer('/api/osm-tiles/{z}/{x}/{y}.png', { maxZoom: 14, minZoom: 2 });
+
+// Start with offline basemap (tiles are ready)
+osmOffline.addTo(map);
+document.getElementById('rb-offline').checked = true;
+document.getElementById('rb-offline').disabled = false;
+document.getElementById('offline-label').textContent = '📡 Offline (ready)';
+console.log('Offline basemap added');
 
 function setBasemap(mode) {
+  console.log('setBasemap:', mode);
   if (mode === 'online') {
     if (map.hasLayer(osmOffline)) map.removeLayer(osmOffline);
     if (!map.hasLayer(osmOnline)) map.addLayer(osmOnline);
@@ -102,41 +108,18 @@ function setBasemap(mode) {
     if (map.hasLayer(osmOnline)) map.removeLayer(osmOnline);
     if (!map.hasLayer(osmOffline)) map.addLayer(osmOffline);
   }
+  console.log('Layers after switch:', Object.keys(map._layers || {}).length);
 }
 
-// Check availability and start with correct basemap
-let startedWithOffline = false;
-fetch('/api/health').then(r => r.json()).then(h => {
-  if (h.offline_tiles && h.tile_count >= h.tile_total_estimated) {
-    document.getElementById('offline-label').textContent = '📡 Offline (ready)';
-    const rb = document.getElementById('rb-offline');
-    rb.disabled = false;
-    rb.checked = true;
-    // Default to offline basemap
-    document.getElementById('rb-online').checked = false;
-    setBasemap('offline');
-    startedWithOffline = true;
-  }
-}).finally(() => {
-  if (!startedWithOffline) {
-    osmOnline.addTo(map);
-    document.getElementById('rb-online').checked = true;
-  }
+// Tile error debugging
+map.on('tileerror', function(e) {
+  console.error('Tile error:', e.tile.src, e.error);
 });
 
-// Refresh download progress
-setInterval(() => {
-  fetch('/api/health').then(r => r.json()).then(h => {
-    const el = document.getElementById('offline-label');
-    const pct = h.tile_count / h.tile_total_estimated;
-    if (pct >= 1) {
-      el.textContent = '📡 Offline (ready)';
-      document.getElementById('rb-offline').disabled = false;
-    } else if (h.tile_count >= 0) {
-      el.textContent = `📡 Offline (${(pct*100).toFixed(1)}% — ${h.tile_count}/${h.tile_total_estimated})`;
-    }
-  });
-}, 10000);
+// Log tile loads
+map.on('tileload', function(e) {
+  console.log('Tile loaded:', e.tile.src);
+});
 
 // layers
 const elevLayer = L.tileLayer('/api/tiles/{z}/{x}/{y}.png?layer=elevation', {
