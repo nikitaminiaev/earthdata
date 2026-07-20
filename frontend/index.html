@@ -69,8 +69,8 @@
   <div style="font-weight:600;margin-bottom:4px;font-size:12px;color:#555">LAYERS</div>
   <label><input type="checkbox" checked onchange="elevLayer.setVisible(this.checked)"><span class="swatch" style="background:#b87"></span>Relief (ASTER/GEBCO)</label>
   <label><input type="checkbox" checked onchange="mrdsLayer.setVisible(this.checked)"><span class="swatch" style="background:#c44"></span>Deposits (MRDS)</label>
-  <label><input type="checkbox" onchange="geolLayer.setVisible(this.checked)"><span class="swatch" style="background:#888"></span>Geology (USGS)</label>
-  <label><input type="checkbox" onchange="gwLayer.setVisible(this.checked)"><span class="swatch" style="background:#66a"></span>Groundwater (IGRAC)</label>
+  <label><input type="checkbox" id="chk-geol" disabled onchange="geolLayer.setVisible(this.checked)"><span class="swatch" style="background:#888"></span>Geology (USGS)</label>
+  <label><input type="checkbox" id="chk-gw" disabled onchange="gwLayer.setVisible(this.checked)"><span class="swatch" style="background:#66a"></span>Groundwater (IGRAC)</label>
 </div>
 
 <script>
@@ -101,13 +101,31 @@ const mrdsLayer = L.geoJSON(null, {
   },
 }).addTo(map);
 
+// layer visibility helper
+L.Layer.include({
+  setVisible(on) {
+    if (on) { if (!map.hasLayer(this)) this.addTo(map); }
+    else { if (map.hasLayer(this)) this.remove(); }
+  }
+});
+
+// Geology
 const geolLayer = L.geoJSON(null, {
   style: { color: '#888', weight: 1, fillOpacity: 0.15 },
 });
+fetch('/api/geology-layer').then(r => r.json()).then(fc => {
+  geolLayer.addData(fc);
+  document.getElementById('chk-geol').disabled = false;
+}).catch(() => {});
 
+// Groundwater
 const gwLayer = L.geoJSON(null, {
   style: { color: '#66a', weight: 1, fillOpacity: 0.12 },
 });
+fetch('/api/gw-aquifertype').then(r => r.json()).then(fc => {
+  gwLayer.addData(fc);
+  document.getElementById('chk-gw').disabled = false;
+}).catch(() => {});
 
 fetch('/api/health').then(r => r.json()).then(h => {
   document.title = `Earthdata — ${h.gebco_cog || h.aster_vrt ? 'ONLINE' : 'OFFLINE'}`;
@@ -116,13 +134,6 @@ fetch('/api/health').then(r => r.json()).then(h => {
 fetch('/api/mrds-layer').then(r => r.json()).then(fc => {
   mrdsLayer.addData(fc);
 }).catch(() => {});
-
-// layer visibility helper
-L.Layer.include({
-  setVisible(on) {
-    if (on) this.addTo(map); else this.remove();
-  }
-});
 
 // Click query
 map.on('click', async (e) => {

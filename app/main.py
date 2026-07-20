@@ -238,13 +238,24 @@ async def groundwater_at_point(
     return result
 
 
-# ---- MRDS GeoJSON layer (for frontend map) ----
+# ---- Vector layer endpoints (for frontend map) ----
 
-@app.get("/api/mrds-layer")
-async def mrds_layer():
-    if not Path(MRDS_GEOJSON).exists():
-        raise HTTPException(404, "MRDS data not available")
-    return Response(content=Path(MRDS_GEOJSON).read_bytes(), media_type="application/geo+json")
+VECS_DIR = Path(__file__).resolve().parent.parent / "data" / "vectors"
+
+def serve_geojson(name: str):
+    p = VECS_DIR / f"{name}.geojson"
+    async def _handler():
+        if not p.exists():
+            raise HTTPException(404)
+        return Response(content=p.read_bytes(), media_type="application/geo+json")
+    return _handler
+
+app.get("/api/mrds-layer")(serve_geojson("mrds"))
+app.get("/api/geology-layer")(serve_geojson("geology"))
+app.get("/api/gw-aquifertype")(serve_geojson("gw_aquifertype"))
+app.get("/api/gw-depth")(serve_geojson("gw_depthtogw"))
+app.get("/api/gw-salinity")(serve_geojson("gw_salinity"))
+app.get("/api/gw-tba")(serve_geojson("gw_tba"))
 
 
 # ---- Health check ----
