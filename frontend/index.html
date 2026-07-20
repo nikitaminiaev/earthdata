@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Earthdata — Геологическая карта</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body, html { margin:0; padding:0; height:100%; font-family:sans-serif; }
+  #map { height:100vh; width:100vw; }
+  #info-panel {
+    position:absolute; top:10px; right:10px; z-index:1000;
+    background:rgba(255,255,255,0.95); padding:12px 16px;
+    border-radius:8px; box-shadow:0 2px 8px rgba(0,0,0,0.3);
+    max-width:360px; max-height:80vh; overflow-y:auto;
+    font-size:13px; display:none;
+  }
+  #info-panel h3 { margin:0 0 8px; font-size:15px; }
+  #info-panel .row { display:flex; justify-content:space-between; padding:2px 0; }
+  #info-panel .label { color:#666; }
+  #info-panel .value { font-weight:600; text-align:right; }
+  #info-panel .deposit { padding:4px 0; border-bottom:1px solid #eee; font-size:12px; }
+  #search-box {
+    position:absolute; top:10px; left:50%; transform:translateX(-50%); z-index:1000;
+    background:white; padding:6px 12px; border-radius:6px;
+    box-shadow:0 2px 6px rgba(0,0,0,0.3); display:flex; gap:8px;
+  }
+  #search-box input { border:1px solid #ccc; border-radius:4px; padding:6px 10px; width:220px; font-size:13px; }
+  #search-box button { background:#4a7; color:white; border:none; border-radius:4px; padding:6px 14px; cursor:pointer; font-size:13px; }
+  #search-results {
+    position:absolute; top:55px; left:50%; transform:translateX(-50%); z-index:1000;
+    background:white; border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,0.3);
+    max-height:300px; overflow-y:auto; width:400px; display:none;
+  }
+  #search-results .item { padding:8px 12px; border-bottom:1px solid #eee; cursor:pointer; font-size:13px; }
+  #search-results .item:hover { background:#e8f5e9; }
+  .legend {
+    position:absolute; bottom:30px; left:10px; z-index:1000;
+    background:rgba(255,255,255,0.9); padding:8px 12px; border-radius:6px; font-size:12px;
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="search-box">
+  <input id="search-input" placeholder="Поиск ископаемого (золото, уголь, ...)" onkeydown="if(event.key==='Enter') searchMineral()"/>
+  <button onclick="searchMineral()">Найти</button>
+</div>
+<div id="search-results"></div>
+
+<div id="info-panel">
+  <h3>Информация о точке</h3>
+  <div id="info-coords" class="row"><span class="label">Координаты</span><span class="value" id="coord-val">—</span></div>
+  <div id="info-elev" class="row"><span class="label">Высота</span><span class="value" id="elev-val">—</span></div>
+  <div id="info-geol" class="row"><span class="label">Геология</span><span class="value" id="geol-val">—</span></div>
+  <div id="info-rock" class="row"><span class="label">Тип породы</span><span class="value" id="rock-val">—</span></div>
+  <hr style="margin:6px 0"/>
+  <div style="font-weight:600;margin-bottom:4px">Месторождения рядом:</div>
+  <div id="deposits-list"></div>
+</div>
+
+<div class="legend">
+  <div>🟤 Рельеф (ASTER/GEBCO)</div>
+  <div style="color:#c44">🔴 Месторождения (MRDS)</div>
+  <div style="color:#66a">🔵 Водные горизонты (IGRAC)</div>
+  <div style="color:#888">⚪ Геология (USGS)</div>
+</div>
+
+<script>
+const map = L.map('map', {
+  center: [55.75, 37.62],
+  zoom: 4,
+  maxZoom: 14,
+  minZoom: 2,
+});
+
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OSM',
+  maxZoom: 19,
+}).addTo(map);
+
+// Elevation tiles
+const elevLayer = L.tileLayer('/api/tiles/{z}/{x}/{y}.png?layer=elevation', {
+  attribution: 'ASTER / GEBCO',
+  maxZoom: 14,
+  opacity: 0.6,
+}).addTo(map);
+
+// MRDS points
+const mrdsLayer = L.geoJSON(null, {
+  pointToLayer: (f, latlng) => L.circleMarker(latlng, {
+    radius: 4, fillColor: '#c44', color: '#c44', weight: 1, opacity: 0.6, fillOpacity: 0.5,
+  }),
+  onEachFeature: (f, layer) => {
+    const p = f.properties || {};
+    const info = `${p.name || '?'}<br>${p.c1 || ''} ${p.c2 || ''}<br>${p.ct || ''}`;
+    layer.bindPopup(info);
+  },
+});
+
+fetch('/api/health').then(r => r.json()).then(h => {
+  document.title = `Earthdata — ${h.gebco_cog || h.aster_vrt ? '🟢' : '🔴'} Сервер готов`;
+});
+
+// Load MRDS
+fetch('/api/mrds-layer').then(r => r.json()).then(fc => {
+  mrdsLayer.addData(fc);
+  map.addLayer(mrdsLayer);
+}).catch(() => {});
+
+// Geology - try to load
+const geolLayer = L.geoJSON(null, {
+  style: { color: '#888', weight: 1, fillOpacity: 0.15 },
+});
+
+// Click to query
+map.on('click', async (e) => {
+  const { lat, lng } = e.latlng;
+  document.getElementById('coord-val').textContent = `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+
+  try {
+    const res = await fetch(`/api/query?lat=${lat}&lon=${lng}`);
+    const data = await res.json();
+    document.getElementById('elev-val').textContent = data.elevation_m != null ? `${data.elevation_m.toFixed(1)} м` : '—';
+    document.getElementById('geol-val').textContent = data.geology?.rock_type || '—';
+    document.getElementById('rock-val').textContent = data.geology?.age_era || '—';
+
+    const dl = document.getElementById('deposits-list');
+    dl.innerHTML = '';
+    (data.mineral_deposits || []).slice(0, 10).forEach(d => {
+      dl.innerHTML += `<div class="deposit"><b>${d.name || '?'}</b> — ${d.c1 || d.ct || ''} <span style="color:#999;font-size:11px">${d.dist_deg ? d.dist_deg.toFixed(2) + '°' : ''}</span></div>`;
+    });
+    if ((data.mineral_deposits || []).length === 0) dl.innerHTML = '<div style="color:#999">Нет рядом</div>';
+  } catch(e) {
+    document.getElementById('elev-val').textContent = 'ошибка';
+  }
+  document.getElementById('info-panel').style.display = 'block';
+});
+
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#info-panel') && !e.target.closest('#map')) {
+    document.getElementById('info-panel').style.display = 'none';
+  }
+});
+
+async function searchMineral() {
+  const q = document.getElementById('search-input').value.trim();
+  if (!q) return;
+  const res = await fetch(`/api/search?commodity=${encodeURIComponent(q)}&limit=50`);
+  const data = await res.json();
+  const div = document.getElementById('search-results');
+  div.innerHTML = '';
+  div.style.display = 'block';
+  if (data.count === 0) {
+    div.innerHTML = '<div style="padding:12px;color:#999">Ничего не найдено</div>';
+    return;
+  }
+  data.results.forEach(r => {
+    div.innerHTML += `<div class="item" onclick="map.setView([${r.lat},${r.lon}], 10);div.style.display='none'"><b>${r.name || '?'}</b> — ${r.commodity} <span style="color:#999">${r.country || ''}</span></div>`;
+  });
+}
+</script>
+</body>
+</html>
