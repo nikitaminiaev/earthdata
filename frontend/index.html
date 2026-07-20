@@ -109,12 +109,12 @@ function setBasemap(mode) {
 setInterval(() => {
   fetch('/api/health').then(r => r.json()).then(h => {
     const el = document.getElementById('offline-label');
-    if (h.offline_tiles && !document.getElementById('rb-offline').disabled) {
+    const pct = h.tile_count / h.tile_total_estimated;
+    if (pct >= 1) {
       el.textContent = '📡 Offline (ready)';
+      document.getElementById('rb-offline').disabled = false;
     } else if (h.tile_count >= 0) {
-      const pct = (h.tile_count / h.tile_total_estimated * 100).toFixed(1);
-      el.textContent = `📡 Offline (${pct}% — ${h.tile_count}/${h.tile_total_estimated})`;
-      if (h.tile_count >= h.tile_total_estimated) location.reload();
+      el.textContent = `📡 Offline (${(pct*100).toFixed(1)}% — ${h.tile_count}/${h.tile_total_estimated})`;
     }
   });
 }, 10000);
