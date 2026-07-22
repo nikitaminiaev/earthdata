@@ -371,6 +371,78 @@ app.get("/api/gw-depth")(serve_geojson("gw_depthtogw"))
 app.get("/api/gw-salinity")(serve_geojson("gw_salinity"))
 app.get("/api/gw-tba")(serve_geojson("gw_tba"))
 app.get("/api/osm-mining")(serve_geojson("osm_mining"))
+app.get("/api/rosnedra")(serve_geojson("rosnedra_plots"))
+def serve_geokniga_catalog():
+    """Serve enriched catalog (with file data) if available, fallback to basic."""
+    files_p = VECS_DIR / "geokniga_catalog_files.geojson"
+    basic_p = VECS_DIR / "geokniga_catalog.geojson"
+    target = files_p if files_p.exists() else basic_p
+
+    async def _handler():
+        if not target.exists():
+            raise HTTPException(404)
+        return Response(content=target.read_bytes(), media_type="application/geo+json")
+    return _handler
+
+app.get("/api/geokniga-catalog")(serve_geokniga_catalog())
+
+GEOKNIGA_FILES = Path(__file__).resolve().parent.parent / "data" / "geokniga_files"
+
+@app.get("/api/geokniga-file/{map_id}/{idx}")
+async def geokniga_file(map_id: int, idx: int):
+    """Serve a single file for a GeoKniga map by index."""
+    # Look up file info from the enriched catalog
+    catalog_path = VECS_DIR / "geokniga_catalog_files.geojson"
+    if not catalog_path.exists():
+        raise HTTPException(404, "No enriched catalog")
+
+    with open(catalog_path) as f:
+        fc = json.load(f)
+
+    target_feat = None
+    for feat in fc['features']:
+        if feat['properties'].get('id') == map_id:
+            target_feat = feat
+            break
+
+    if not target_feat:
+        raise HTTPException(404, f"Map {map_id} not found")
+
+    files = target_feat['properties'].get('files', [])
+    if idx < 0 or idx >= len(files):
+        raise HTTPException(404, f"File index {idx} out of range")
+
+    finfo = files[idx]
+    name = finfo.get('name', f'file_{idx}')
+    ext = finfo.get('ext', '')
+
+    # Build local path: data/geokniga_files/{map_id}/{idx:02d}_{sanitized_name}.{ext}
+    sanitized = name.strip().replace('/', '_').replace('\\', '_')
+    sanitized = ''.join(c for c in sanitized if c.isprintable() and c not in '<>:"|?*')
+    if ext and not sanitized.endswith('.' + ext):
+        fname = f"{idx:02d}_{sanitized}.{ext}"
+    else:
+        fname = f"{idx:02d}_{sanitized}"
+
+    fpath = GEOKNIGA_FILES / str(map_id) / fname
+
+    if not fpath.exists():
+        # Fallback: try to serve from the remote URL
+        remote_url = finfo.get('url', '')
+        return Response(
+            content=json.dumps({"error": "file not downloaded", "url": remote_url, "local_path": str(fpath)}),
+            media_type="application/json",
+            status_code=404,
+        )
+
+    # Determine media type from extension
+    media_type = {
+        'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
+        'gif': 'image/gif', 'pdf': 'application/pdf',
+        'tif': 'image/tiff', 'tiff': 'image/tiff',
+    }.get(ext, 'application/octet-stream')
+
+    return Response(content=fpath.read_bytes(), media_type=media_type)
 
 
 # ---- Health check ----

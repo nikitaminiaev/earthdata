@@ -43,6 +43,30 @@
   .controls label { display:flex; align-items:center; gap:8px; padding:3px 0; cursor:pointer; }
   .controls input[type=checkbox] { width:16px; height:16px; cursor:pointer; accent-color:#4a7; }
   .controls .swatch { display:inline-block; width:12px; height:12px; border-radius:50%; flex-shrink:0; }
+  #viewer-overlay {
+    display:none; position:fixed; z-index:10000; left:0; top:0; width:100%; height:100%;
+    background:rgba(0,0,0,0.85); justify-content:center; align-items:center;
+  }
+  #viewer-container {
+    background:#fff; border-radius:8px; max-width:95vw; max-height:95vh;
+    overflow:hidden; display:flex; flex-direction:column; box-shadow:0 4px 20px rgba(0,0,0,0.5);
+  }
+  #viewer-header {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:8px 12px; border-bottom:1px solid #ddd; font-size:14px; font-weight:600;
+  }
+  #viewer-close { background:none; border:none; font-size:20px; cursor:pointer; color:#666; padding:0 4px; }
+  #viewer-close:hover { color:#000; }
+  #viewer-body { padding:8px; display:flex; justify-content:center; align-items:center; overflow:auto; flex:1; }
+  #viewer-footer {
+    display:flex; justify-content:center; align-items:center; gap:12px;
+    padding:8px; border-top:1px solid #ddd; font-size:13px;
+  }
+  #viewer-footer button {
+    background:#eee; border:1px solid #ccc; border-radius:4px; padding:4px 12px; cursor:pointer; font-size:16px;
+  }
+  #viewer-footer button:hover { background:#ddd; }
+  #viewer-footer button:disabled { opacity:0.3; cursor:default; }
 </style>
 </head>
 <body>
@@ -53,6 +77,25 @@
   <button onclick="searchMineral()">Search</button>
 </div>
 <div id="search-results"></div>
+
+<div id="viewer-overlay" onclick="closeGeoknigaViewer()">
+  <div id="viewer-container" onclick="event.stopPropagation()">
+    <div id="viewer-header">
+      <span id="viewer-title"></span>
+      <button id="viewer-close" onclick="closeGeoknigaViewer()">✕</button>
+    </div>
+    <div id="viewer-body">
+      <img id="viewer-img" style="max-width:100%;max-height:calc(100vh - 100px);display:none"/>
+      <object id="viewer-pdf" style="width:100%;height:calc(100vh - 100px);display:none"></object>
+      <div id="viewer-error" style="display:none;color:#c44;padding:20px"></div>
+    </div>
+    <div id="viewer-footer">
+      <button onclick="prevGeoknigaFile()" id="viewer-prev">◀</button>
+      <span id="viewer-counter"></span>
+      <button onclick="nextGeoknigaFile()" id="viewer-next">▶</button>
+    </div>
+  </div>
+</div>
 
 <div id="info-panel">
   <h3>Point info</h3>
@@ -73,6 +116,14 @@
   <label><input type="checkbox" id="chk-osm-mining" onchange="osmMiningLayer.setVisible(this.checked);toggleMiningLegend(this.checked)"><span class="swatch" style="background:#e80"></span>Quarries (OSM)</label>
   <div id="mining-legend" style="display:none;margin-top:4px;font-size:11px;padding:4px 6px;background:#f8f8f8;border-radius:4px;max-height:150px;overflow-y:auto">
     <div style="font-weight:600;margin-bottom:2px">Resources:</div>
+  </div>
+  <label><input type="checkbox" id="chk-rosnedra" onchange="rosnedraLayer.setVisible(this.checked);toggleRosnedraLegend(this.checked)"><span class="swatch" style="background:#e67e22"></span>Rosnedra 2026</label>
+  <div id="rosnedra-legend" style="display:none;margin-top:4px;font-size:11px;padding:4px 6px;background:#f8f8f8;border-radius:4px;max-height:150px;overflow-y:auto">
+    <div style="font-weight:600;margin-bottom:2px">Resource types:</div>
+  </div>
+  <label><input type="checkbox" id="chk-geokniga" onchange="geoknigaLayer.setVisible(this.checked);toggleGeoknigaLegend(this.checked)"><span class="swatch" style="background:#9b59b6"></span>GeoKniga catalog</label>
+  <div id="geokniga-legend" style="display:none;margin-top:4px;font-size:11px;padding:4px 6px;background:#f8f8f8;border-radius:4px;max-height:150px;overflow-y:auto">
+    <div style="font-weight:600;margin-bottom:2px">Scale:</div>
   </div>
   <label><input type="checkbox" id="chk-geol" disabled onchange="geolLayer.setVisible(this.checked)"><span class="swatch" style="background:#888"></span>Geology (USGS)</label>
   <label><input type="checkbox" id="chk-gw" disabled onchange="gwLayer.setVisible(this.checked)"><span class="swatch" style="background:#66a"></span>Groundwater (IGRAC)</label>
@@ -191,7 +242,215 @@ const osmMiningLayer = L.geoJSON(null, {
   },
 });
 
-// layer visibility helper
+const ROSNEDRA_COLORS = {
+  'углеводородное сырье': '#e67e22',
+  'промышленные подземные воды': '#3498db',
+  'минеральные воды': '#2ecc71',
+  'другое': '#95a5a6',
+};
+
+const rosnedraLayer = L.geoJSON(null, {
+  pointToLayer: (f, latlng) => {
+    const color = ROSNEDRA_COLORS[f.properties?.mineral_cat] || '#95a5a6';
+    return L.circleMarker(latlng, {
+      radius: 6, fillColor: color, color: '#333', weight: 1, opacity: 0.7, fillOpacity: 0.6,
+    });
+  },
+  onEachFeature: (f, layer) => {
+    const p = f.properties || {};
+    const parts = [p.name].filter(Boolean);
+    if (p.region) parts.push(`<i>${p.region}</i>`);
+    if (p.mineral) parts.push(`<b>${p.mineral}</b>`);
+    if (p.usage) parts.push(p.usage);
+    if (p.area) parts.push(`Площадь: ${p.area}`);
+    if (p.form) parts.push(`Форма: ${p.form}`);
+    if (p.timing) parts.push(`Сроки: ${p.timing}`);
+    layer.bindPopup(parts.join('<br>'));
+  },
+});
+
+const GEOKNIGA_SCALE_COLORS = {
+  '1:25K': '#e74c3c', '1:50K': '#e67e22', '1:100K': '#f1c40f',
+  '1:200K': '#2ecc71', '1:500K': '#3498db', '1:1M': '#9b59b6',
+};
+
+function geoknigaScaleLabel(scale) {
+  if (!scale) return { color: '#999', label: 'unknown' };
+  const d = parseInt(scale.replace(/[^0-9]/g,''), 10);
+  if (d <= 25000) return { color: '#e74c3c', label: '1:25K' };
+  if (d <= 50000) return { color: '#e67e22', label: '1:50K' };
+  if (d <= 100000) return { color: '#f1c40f', label: '1:100K' };
+  if (d <= 200000) return { color: '#2ecc71', label: '1:200K' };
+  if (d <= 500000) return { color: '#3498db', label: '1:500K' };
+  if (d <= 1000000) return { color: '#9b59b6', label: '1:1M' };
+  return { color: '#95a5a6', label: 'small' };
+}
+
+function geoknigaPopup(f) {
+  const p = f.properties || {};
+  const parts = [`<b>${p.title || '?'}</b>`];
+  if (p.nomer) parts.push(`<span style="color:#666">Номенклатура:</span> ${p.nomer}`);
+  if (p.scale) parts.push(`<span style="color:#666">Масштаб:</span> ${p.scale}`);
+  if (p.year) parts.push(`<span style="color:#666">Год:</span> ${p.year}`);
+  if (p.series) parts.push(`<span style="color:#666">Серия:</span> ${p.series}`);
+  if (p.labels && p.labels.length) parts.push(`<span style="color:#666">Метки:</span> ${p.labels.join(', ')}`);
+
+  const files = p.files || [];
+  if (files.length > 0) {
+    parts.push('<hr style="margin:6px 0"><div style="font-weight:600;margin-bottom:3px;font-size:12px">Файлы (' + p.files_count + '):</div>');
+    const total = p.files_total_size;
+    if (total) parts.push('<div style="font-size:11px;color:#888">Всего: ' + total + '</div>');
+    parts.push('<div style="max-height:180px;overflow-y:auto;font-size:12px">');
+    files.forEach((f, i) => {
+      const isImage = /^(jpg|jpeg|png|gif|tif|tiff)$/i.test(f.ext || '');
+      const isPdf = f.ext === 'pdf';
+      const ext = f.ext ? f.ext.toUpperCase() : 'FILE';
+      const localPath = '/api/geokniga-file/' + p.id + '/' + i;
+      if (isImage) {
+        parts.push('<div style="padding:2px 0"><span style="color:#999;font-size:10px">[' + ext + ']</span> <a href="#" onclick="showGeoknigaFile(' + p.id + ',' + i + ');return false">' + f.name + '</a> <span style="color:#888;font-size:11px">(' + f.size_str + ')</span></div>');
+      } else if (isPdf) {
+        parts.push('<div style="padding:2px 0"><span style="color:#999;font-size:10px">[PDF]</span> <a href="' + localPath + '" target="_blank">' + f.name + '</a> <span style="color:#888;font-size:11px">(' + f.size_str + ')</span></div>');
+      } else {
+        parts.push('<div style="padding:2px 0"><span style="color:#999;font-size:10px">[' + ext + ']</span> <a href="' + localPath + '" target="_blank">' + f.name + '</a> <span style="color:#888;font-size:11px">(' + f.size_str + ')</span></div>');
+      }
+    });
+    parts.push('</div>');
+  }
+
+  parts.push('<hr style="margin:4px 0"><a href="' + p.url + '" target="_blank" style="font-size:11px">Открыть на GeoKniga →</a>');
+  return parts.join('<br>');
+}
+
+const geoknigaLayer = L.geoJSON(null, {
+  style: (f) => {
+    const { color } = geoknigaScaleLabel(f.properties?.scale);
+    return { fillColor: color, color: '#666', weight: 0.3, fillOpacity: 0.12 };
+  },
+  pointToLayer: (f, latlng) => {
+    const { color } = geoknigaScaleLabel(f.properties?.scale);
+    return L.circleMarker(latlng, {
+      radius: 3, fillColor: color, color: '#333', weight: 0.5, fillOpacity: 0.4,
+    });
+  },
+  onEachFeature: (f, layer) => {
+    layer.bindPopup(geoknigaPopup(f));
+  },
+});
+
+// ── Image/PDF viewer for GeoKniga files ──
+let currentViewerMapId = 0;
+let currentViewerIdx = 0;
+let currentViewerFiles = [];
+
+function showGeoknigaFile(mapId, idx) {
+  const overlay = document.getElementById('viewer-overlay');
+  const img = document.getElementById('viewer-img');
+  const pdf = document.getElementById('viewer-pdf');
+  const err = document.getElementById('viewer-error');
+  const title = document.getElementById('viewer-title');
+  const counter = document.getElementById('viewer-counter');
+
+  img.style.display = 'none';
+  pdf.style.display = 'none';
+  err.style.display = 'none';
+
+  currentViewerMapId = mapId;
+  currentViewerIdx = idx;
+
+  // Find the map's files from loaded GeoJSON
+  if (!window._geoknigaFC) {
+    err.style.display = 'block';
+    err.textContent = 'Catalog not loaded';
+    overlay.style.display = 'flex';
+    return;
+  }
+  let feat = null;
+  for (const f of window._geoknigaFC.features) {
+    if (f.properties.id === mapId) { feat = f; break; }
+  }
+  if (!feat) {
+    err.style.display = 'block'; err.textContent = 'Map not found';
+    overlay.style.display = 'flex'; return;
+  }
+  currentViewerFiles = feat.properties.files || [];
+  displayViewerFile();
+  overlay.style.display = 'flex';
+}
+
+function displayViewerFile() {
+  const img = document.getElementById('viewer-img');
+  const pdf = document.getElementById('viewer-pdf');
+  const err = document.getElementById('viewer-error');
+  const title = document.getElementById('viewer-title');
+  const counter = document.getElementById('viewer-counter');
+  const prevBtn = document.getElementById('viewer-prev');
+  const nextBtn = document.getElementById('viewer-next');
+
+  img.style.display = 'none';
+  pdf.style.display = 'none';
+  err.style.display = 'none';
+
+  const finfo = currentViewerFiles[currentViewerIdx];
+  if (!finfo) {
+    err.style.display = 'block'; err.textContent = 'File not found';
+    overlay.style.display = 'flex'; return;
+  }
+
+  title.textContent = finfo.name + ' (' + finfo.size_str + ')';
+  counter.textContent = (currentViewerIdx + 1) + '/' + currentViewerFiles.length;
+  prevBtn.disabled = currentViewerIdx === 0;
+  nextBtn.disabled = currentViewerIdx >= currentViewerFiles.length - 1;
+
+  const localPath = '/api/geokniga-file/' + currentViewerMapId + '/' + currentViewerIdx;
+  const ext = (finfo.ext || '').toLowerCase();
+
+  if (/^(jpg|jpeg|png|gif|tif|tiff)$/.test(ext)) {
+    img.src = localPath;
+    img.style.display = 'block';
+    img.onerror = function() {
+      img.style.display = 'none';
+      err.style.display = 'block';
+      err.textContent = 'Failed to load image (not yet downloaded)';
+    };
+  } else if (ext === 'pdf') {
+    pdf.data = localPath;
+    pdf.style.display = 'block';
+    pdf.onerror = function() {
+      pdf.style.display = 'none';
+      err.style.display = 'block';
+      err.textContent = 'Failed to load PDF (not yet downloaded)';
+    };
+  } else {
+    err.style.display = 'block';
+    err.textContent = 'Preview not available for this file type. Download: ' + localPath;
+  }
+}
+
+function nextGeoknigaFile() {
+  if (currentViewerIdx < currentViewerFiles.length - 1) {
+    currentViewerIdx++;
+    displayViewerFile();
+  }
+}
+
+function prevGeoknigaFile() {
+  if (currentViewerIdx > 0) {
+    currentViewerIdx--;
+    displayViewerFile();
+  }
+}
+
+function closeGeoknigaViewer() {
+  document.getElementById('viewer-overlay').style.display = 'none';
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeGeoknigaViewer();
+  if (e.key === 'ArrowRight') nextGeoknigaFile();
+  if (e.key === 'ArrowLeft') prevGeoknigaFile();
+});
+
+// ── layer visibility helper ──
 L.Layer.include({
   setVisible(on) {
     if (on) { if (!map.hasLayer(this)) this.addTo(map); }
@@ -275,6 +534,53 @@ fetch('/api/osm-mining').then(r => r.json()).then(fc => {
   osmMiningLayer.addData(fc);
   buildMiningLegend(fc);
   document.getElementById('chk-osm-mining').checked = true;
+}).catch(() => {});
+
+function toggleRosnedraLegend(show) {
+  document.getElementById('rosnedra-legend').style.display = show ? 'block' : 'none';
+}
+
+function buildRosnedraLegend(fc) {
+  const seen = new Set();
+  const legend = document.getElementById('rosnedra-legend');
+  fc.features.forEach(f => {
+    const r = f.properties?.mineral_cat;
+    if (!r || seen.has(r)) return;
+    seen.add(r);
+    const c = ROSNEDRA_COLORS[r] || '#95a5a6';
+    const label = { 'углеводородное сырье': 'Hydrocarbons', 'промышленные подземные воды': 'Industrial water', 'минеральные воды': 'Mineral water', 'другое': 'Other' }[r] || r;
+    legend.innerHTML += `<div><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${c};margin-right:4px"></span>${label}</div>`;
+  });
+}
+
+fetch('/api/rosnedra').then(r => r.json()).then(fc => {
+  rosnedraLayer.addData(fc);
+  buildRosnedraLegend(fc);
+  document.getElementById('chk-rosnedra').checked = true;
+}).catch(() => {});
+
+function toggleGeoknigaLegend(show) {
+  document.getElementById('geokniga-legend').style.display = show ? 'block' : 'none';
+}
+
+function buildGeoknigaLegend(fc) {
+  const seen = new Set();
+  const legend = document.getElementById('geokniga-legend');
+  fc.features.forEach(f => {
+    const s = f.properties?.scale;
+    if (!s) return;
+    const { color, label } = geoknigaScaleLabel(s);
+    if (seen.has(label)) return;
+    seen.add(label);
+    legend.innerHTML += `<div><span style="display:inline-block;width:10px;height:10px;background:${color};margin-right:4px;border:1px solid #666"></span>${label}</div>`;
+  });
+}
+
+fetch('/api/geokniga-catalog').then(r => r.json()).then(fc => {
+  window._geoknigaFC = fc;
+  geoknigaLayer.addData(fc);
+  buildGeoknigaLegend(fc);
+  document.getElementById('chk-geokniga').checked = true;
 }).catch(() => {});
 
 // Click query

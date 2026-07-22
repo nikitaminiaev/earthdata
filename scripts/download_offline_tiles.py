@@ -127,22 +127,6 @@ def main():
     out_db_path = Path(args.output)
     out_db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # estimate tiles
-    total_tiles = 0
-    tile_list = []
-    for z in range(min_zoom, max_zoom + 1):
-        x_min, x_max, y_min, y_max = tile_bounds(lon_min, lat_min, lon_max, lat_max, z)
-        tiles_at_z = (x_max - x_min + 1) * (y_max - y_min + 1)
-        total_tiles += tiles_at_z
-        print(f"  z{z}: x[{x_min}-{x_max}] y[{y_min}-{y_max}] = {tiles_at_z} tiles")
-        for x in range(x_min, x_max + 1):
-            for y in range(y_min, y_max + 1):
-                tile_list.append((z, x, y))
-
-    print(f"\nTotal tiles to download: {total_tiles}")
-    est_size_mb = total_tiles * 0.015  # ~15 KB per tile
-    print(f"Estimated size: {est_size_mb:.0f} MB")
-
     # create MBTiles DB
     conn = sqlite3.connect(str(out_db_path))
     conn.execute("CREATE TABLE IF NOT EXISTS tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB)")
@@ -155,60 +139,81 @@ def main():
     conn.execute("INSERT OR REPLACE INTO metadata VALUES ('description', 'OSM tiles for offline use')")
     conn.commit()
 
-    # filter out already downloaded with valid content
-    existing = conn.execute("SELECT COUNT(*) FROM tiles").fetchone()[0]
-    print(f"Already in DB: {existing} tiles")
-    print("Checking existing tiles for blocked content...")
+    # Load existing tile keys (no tile_data — avoids OOM on RPi)
+    existing_keys = set()
+    for row in conn.execute("SELECT zoom_level, tile_column, tile_row FROM tiles").fetchall():
+        existing_keys.add((row[0], row[1], row[2]))
+    conn.close()
 
-    blocked_lookup = {}
-    batch_size = 10000
-    offset = 0
-    while True:
-        rows = conn.execute(
-            "SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles LIMIT ? OFFSET ?",
-            (batch_size, offset),
-        ).fetchall()
-        if not rows:
-            break
-        for z, x, tms_y, data in rows:
-            if is_blocked_tile(data):
-                blocked_lookup[(z, x, tms_y)] = True
-        offset += len(rows)
-        print(f"  Checked {offset}/{existing}...")
+    total_existing = len(existing_keys)
+    print(f"Existing: {total_existing} tiles")
 
-    to_download = []
-    valid_skip = 0
-    for z, x, y in tile_list:
-        tms_y = osm_to_tms(y, z)
-        if (z, x, tms_y) in blocked_lookup:
-            to_download.append((z, x, y))
-        elif conn.execute(
-            "SELECT 1 FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
-            (z, x, tms_y),
-        ).fetchone() is None:
-            to_download.append((z, x, y))
-        else:
-            valid_skip += 1
+    # Estimate tiles per zoom
+    zoom_tile_counts = {}
+    total_tiles = 0
+    for z in range(min_zoom, max_zoom + 1):
+        x_min, x_max, y_min, y_max = tile_bounds(lon_min, lat_min, lon_max, lat_max, z)
+        n = (x_max - x_min + 1) * (y_max - y_min + 1)
+        zoom_tile_counts[z] = (x_min, x_max, y_min, y_max, n)
+        total_tiles += n
+        print(f"  z{z}: x[{x_min}-{x_max}] y[{y_min}-{y_max}] = {n:,} tiles")
 
-    recheck_count = len(to_download)
-    print(f"To download: {len(to_download)} ({valid_skip} valid cached, {recheck_count} to re-download)")
+    print(f"\nTotal: {total_tiles:,} tiles, ~{total_tiles * 0.02:.0f} MB estimated")
+    print(f"Already in DB: {total_existing}")
 
-    stats = {"downloaded": 0, "errors": 0, "total": len(to_download), "start": time.time()}
+    stats = {"downloaded": 0, "errors": 0, "total": total_tiles - total_existing, "start": time.time()}
     lock = threading.Lock()
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-        futures = [pool.submit(download_tile, z, x, y, out_db_path, lock, stats) for z, x, y in to_download]
-        for f in as_completed(futures):
-            pass
+    # Process one zoom level at a time to limit memory
+    overall_done = total_existing
+    for z in range(min_zoom, max_zoom + 1):
+        x_min, x_max, y_min, y_max, tiles_at_z = zoom_tile_counts[z]
+        print(f"\n--- Zoom {z} ({tiles_at_z:,} tiles) ---")
+
+        # Build tile list for this zoom only
+        zoom_tiles = []
+        for x in range(x_min, x_max + 1):
+            for y in range(y_min, y_max + 1):
+                tms_y = osm_to_tms(y, z)
+                if (z, x, tms_y) not in existing_keys:
+                    zoom_tiles.append((z, x, y))
+
+        if not zoom_tiles:
+            print(f"  All {tiles_at_z:,} tiles already exist, skipping")
+            overall_done += tiles_at_z
+            continue
+
+        print(f"  To download: {len(zoom_tiles):,} (skipping {tiles_at_z - len(zoom_tiles):,})")
+
+        # Download in batches of 5000 to avoid huge memory
+        BATCH = 5000
+        for batch_start in range(0, len(zoom_tiles), BATCH):
+            batch = zoom_tiles[batch_start:batch_start + BATCH]
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                futures = [pool.submit(download_tile, zz, xx, yy, str(out_db_path), lock, stats)
+                          for zz, xx, yy in batch]
+                for f in as_completed(futures):
+                    pass
+
+            overall_done += len(batch)
+            elapsed = time.time() - stats["start"]
+            if elapsed > 0:
+                rate = stats["downloaded"] / elapsed
+                remaining = (stats["total"] - stats["downloaded"]) / rate if rate > 0 else 0
+                print(f"  {stats['downloaded']}/{stats['total']} | {rate:.1f} t/s | ETA {remaining:.0f}s")
+
+        # Free memory before next zoom
+        del zoom_tiles
 
     # final count
+    conn = sqlite3.connect(str(out_db_path))
     final = conn.execute("SELECT COUNT(*) FROM tiles").fetchone()[0]
     conn.execute("INSERT OR REPLACE INTO metadata VALUES ('count', ?)", (str(final),))
     conn.commit()
     conn.close()
 
     print(f"\nDone. {final} tiles in {out_db_path}")
-    size_mb = out_db_path.stat().st_size / 1024 / 1024
+    size_mb = Path(out_db_path).stat().st_size / 1024 / 1024
     print(f"DB size: {size_mb:.0f} MB")
     print(f"Errors: {stats['errors']}")
 
