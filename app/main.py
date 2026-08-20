@@ -370,7 +370,7 @@ app.get("/api/gw-aquifertype")(serve_geojson("gw_aquifertype"))
 app.get("/api/gw-depth")(serve_geojson("gw_depthtogw"))
 app.get("/api/gw-salinity")(serve_geojson("gw_salinity"))
 app.get("/api/gw-tba")(serve_geojson("gw_tba"))
-app.get("/api/osm-mining")(serve_geojson("osm_mining"))
+app.get("/api/osm-mining")(serve_geojson("osm_mining_enriched"))
 app.get("/api/rosnedra")(serve_geojson("rosnedra_plots"))
 def serve_geokniga_catalog():
     """Serve enriched catalog (with file data) if available, fallback to basic."""
@@ -389,9 +389,8 @@ app.get("/api/geokniga-catalog")(serve_geokniga_catalog())
 GEOKNIGA_FILES = Path(__file__).resolve().parent.parent / "data" / "geokniga_files"
 
 @app.get("/api/geokniga-file/{map_id}/{idx}")
-async def geokniga_file(map_id: int, idx: int):
-    """Serve a single file for a GeoKniga map by index."""
-    # Look up file info from the enriched catalog
+async def geokniga_file(map_id: int, idx: int, check: bool = False):
+    """Serve a single file for a GeoKniga map by index. ?check=1 returns 200/404 without body."""
     catalog_path = VECS_DIR / "geokniga_catalog_files.geojson"
     if not catalog_path.exists():
         raise HTTPException(404, "No enriched catalog")
@@ -416,7 +415,6 @@ async def geokniga_file(map_id: int, idx: int):
     name = finfo.get('name', f'file_{idx}')
     ext = finfo.get('ext', '')
 
-    # Build local path: data/geokniga_files/{map_id}/{idx:02d}_{sanitized_name}.{ext}
     sanitized = name.strip().replace('/', '_').replace('\\', '_')
     sanitized = ''.join(c for c in sanitized if c.isprintable() and c not in '<>:"|?*')
     if ext and not sanitized.endswith('.' + ext):
@@ -427,15 +425,11 @@ async def geokniga_file(map_id: int, idx: int):
     fpath = GEOKNIGA_FILES / str(map_id) / fname
 
     if not fpath.exists():
-        # Fallback: try to serve from the remote URL
-        remote_url = finfo.get('url', '')
-        return Response(
-            content=json.dumps({"error": "file not downloaded", "url": remote_url, "local_path": str(fpath)}),
-            media_type="application/json",
-            status_code=404,
-        )
+        raise HTTPException(404, "File not downloaded yet")
 
-    # Determine media type from extension
+    if check:
+        return Response(status_code=200)
+
     media_type = {
         'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
         'gif': 'image/gif', 'pdf': 'application/pdf',

@@ -10,10 +10,8 @@ Supports resume: skips files that already exist with matching size.
 import sys
 import json
 import time
-import os
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.parse import unquote
+import concurrent.futures
 
 try:
     import requests
@@ -26,8 +24,14 @@ FILES_DIR = Path(__file__).resolve().parent.parent / "data" / "geokniga_files"
 MANIFEST_FILE = VECS_DIR / "geokniga_download_manifest.json"
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (compatible; GeoKnigaDownloader/1.0)'}
-MAX_WORKERS = 4
-REQUEST_DELAY = 0.5  # between requests per map
+MAX_WORKERS = 2
+REQUEST_DELAY = 1.0
+RETRIES = 3
+RETRY_BACKOFF = [5, 15, 45]
+
+session = requests.Session()
+session.headers.update(HEADERS)
+session.keep_alive = False
 
 
 def sanitize_filename(name: str):
@@ -36,60 +40,50 @@ def sanitize_filename(name: str):
     return name[:120]
 
 
-def get_remote_size(url: str):
-    try:
-        r = requests.head(url, headers=HEADERS, timeout=10, allow_redirects=True)
-        return int(r.headers.get('content-length', 0))
-    except Exception:
-        return 0
-
-
 def download_file(map_id: int, file_info: dict, idx: int):
-    """Download a single file. Returns (map_id, idx, success, bytes_downloaded)."""
+    """Download a single file with retries. Returns (map_id, idx, success, bytes_downloaded)."""
     url = file_info['url']
     name = file_info['name']
-    size_str = file_info.get('size_str', '')
     ext = file_info.get('ext', '')
 
     map_dir = FILES_DIR / str(map_id)
     map_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build filename: index_name.ext
-    base = sanitize_filename(name)
-    if not base:
-        base = f"file_{idx}"
+    base = sanitize_filename(name) or f"file_{idx}"
     if ext and not base.endswith('.' + ext):
         fname = f"{idx:02d}_{base}.{ext}"
     else:
         fname = f"{idx:02d}_{base}"
     fpath = map_dir / fname
 
-    # Check if already downloaded
-    if fpath.exists():
-        local_size = fpath.stat().st_size
-        expected_size = get_remote_size(url)
-        if expected_size > 0 and local_size == expected_size:
-            return (map_id, idx, True, local_size)
-        if fpath.stat().st_size > 1024:  # at least 1KB — assume valid
-            return (map_id, idx, True, local_size)
+    if fpath.exists() and fpath.stat().st_size > 1024:
+        return (map_id, idx, True, fpath.stat().st_size)
 
-    # Download
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=60, stream=True)
-        if r.status_code != 200:
-            return (map_id, idx, False, 0)
-        total = 0
-        with open(fpath, 'wb') as f:
-            for chunk in r.iter_content(8192):
-                if chunk:
-                    f.write(chunk)
-                    total += len(chunk)
-        return (map_id, idx, True, total)
-    except Exception as e:
-        print(f"  Error [{map_id}/{idx}]: {e}", file=sys.stderr)
-        if fpath.exists():
-            fpath.unlink()
-        return (map_id, idx, False, 0)
+    last_error = None
+    for attempt in range(RETRIES):
+        try:
+            r = session.get(url, timeout=120, stream=True)
+            if r.status_code != 200:
+                last_error = f"HTTP {r.status_code}"
+                if attempt < RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF[attempt])
+                continue
+            total = 0
+            with open(fpath, 'wb') as f:
+                for chunk in r.iter_content(8192):
+                    if chunk:
+                        f.write(chunk)
+                        total += len(chunk)
+            return (map_id, idx, True, total)
+        except Exception as e:
+            last_error = str(e)
+            if attempt < RETRIES - 1:
+                time.sleep(RETRY_BACKOFF[attempt])
+
+    print(f"  Error [{map_id}/{idx}]: {last_error}", file=sys.stderr)
+    if fpath.exists():
+        fpath.unlink()
+    return (map_id, idx, False, 0)
 
 
 def main():
@@ -130,32 +124,57 @@ def main():
         print("All files already downloaded!")
         return
 
-    # Download
     total_bytes = 0
     completed_maps = set(already_done)
     completed_files = 0
+    consec_fails = 0
+    cooldown = 0
+    queue_idx = 0
+    total = len(remaining)
+    start_time = time.time()
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
         futures = {}
-        for mid, finfo, idx in remaining:
-            time.sleep(REQUEST_DELAY / MAX_WORKERS)
-            fut = pool.submit(download_file, mid, finfo, idx)
-            futures[fut] = (mid, idx)
+        while queue_idx < total or futures:
+            while len(futures) < MAX_WORKERS and queue_idx < total:
+                if cooldown > 0:
+                    print(f"  ⏳ Cooldown {cooldown}s at {completed_files}/{total}...", file=sys.stderr)
+                    time.sleep(cooldown)
+                    cooldown = max(0, cooldown - 30)
+                time.sleep(REQUEST_DELAY / MAX_WORKERS)
+                mid, finfo, idx = remaining[queue_idx]
+                fut = pool.submit(download_file, mid, finfo, idx)
+                futures[fut] = (mid, idx)
+                queue_idx += 1
 
-        for fut in as_completed(futures):
-            mid, idx, success, bcount = fut.result()
-            if success:
-                total_bytes += bcount
-                completed_files += 1
-                completed_maps.add(mid)
-
-            if completed_files % 20 == 0 or completed_files == len(remaining):
-                pct = completed_files * 100 / len(remaining)
-                mb = total_bytes / 1048576
-                print(f"  [{completed_files}/{len(remaining)}] {pct:.0f}% | {mb:.0f} MB", file=sys.stderr)
-
-            # Save manifest periodically
-            if completed_files % 100 == 0:
+            if not futures:
+                break
+            done, _ = concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+            for fut in done:
+                mid, idx = futures.pop(fut)
+                rmid, ridx, success, bcount = fut.result()
+                if success:
+                    total_bytes += bcount
+                    completed_files += 1
+                    completed_maps.add(mid)
+                    consec_fails = max(0, consec_fails - 1)
+                    if cooldown > 0 and consec_fails == 0:
+                        cooldown = max(0, cooldown - 10)
+                else:
+                    consec_fails += 1
+                    if consec_fails >= 3:
+                        new_cd = min(cooldown + 120, 600)
+                        if new_cd > cooldown:
+                            cooldown = new_cd
+                            print(f"  ⚠ Cooldown raised to {cooldown}s ({consec_fails} consecutive failures)", file=sys.stderr)
+                        consec_fails = 0
+            mb = total_bytes / 1048576
+            elapsed = time.time() - start_time
+            rate = completed_files / elapsed if elapsed > 0 else 0
+            eta = (total - completed_files) / rate if rate > 0 else 0
+            if completed_files and completed_files % 10 == 0:
+                print(f"  [{completed_files}/{total}] {mb:.0f} MB | {rate:.1f} f/s | ETA {eta/60:.0f}min", file=sys.stderr)
+            if completed_files % 50 == 0:
                 with open(MANIFEST_FILE, 'w') as f:
                     json.dump(list(completed_maps), f)
 

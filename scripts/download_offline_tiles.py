@@ -15,19 +15,54 @@ from pathlib import Path
 from urllib.request import urlopen, Request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import socket
+
+# This machine has no IPv6 route. DNS returns AAAA records first, so urllib
+# hangs ~5s on each IPv6 connect attempt and errors "Network is unreachable".
+# Force IPv4 lookups and cache results so the hot path never re-queries DNS
+# (the resolver intermittently fails to return A records under load).
+_orig_getaddrinfo = socket.getaddrinfo
+_dns_cache = {}
+
+
+def _cached_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if family == 0:
+        family = socket.AF_INET
+    key = (host, port, type, proto, flags)
+    cached = _dns_cache.get(key)
+    if cached is not None:
+        return cached
+    last_err = None
+    for attempt in range(3):
+        try:
+            result = _orig_getaddrinfo(host, port, family, type, proto, flags)
+            _dns_cache[key] = result
+            return result
+        except socket.gaierror as e:
+            last_err = e
+            time.sleep(0.3)
+    raise last_err
+
+
+socket.getaddrinfo = _cached_getaddrinfo
+
+# Pre-warm the tile host DNS cache so downloads never block on lookups
+try:
+    _cached_getaddrinfo("tile.openstreetmap.org", 443, socket.AF_INET, socket.SOCK_STREAM)
+except Exception:
+    pass
 
 # Thread-local SQLite connections
 _tls = threading.local()
 
-USER_AGENT = "curl/8.0"  # OSM blocks browser-like UAs, curl works
-DELAY = 0.05  # seconds between requests per thread
-MAX_WORKERS = 4
+USER_AGENT = "Mozilla/5.0 (X11; Linux armv7l) rv:115.0 Gecko/20100101 Firefox/115.0"
+DELAY = 0.1  # seconds between requests per thread
+MAX_WORKERS = 6
 MAX_RETRIES = 2
 
-# Known blocked/placeholder tile MD5 hashes (OSM 403 response)
+# Known blocked/placeholder tile MD5 hashes
 BLOCKED_HASHES = {
-    "c069a15b2cc2d6b6f527ad09eb93c61a",  # OSM "Access blocked" tile (no UA)
-    "0ca3dfb6df8f39994a6a2e69127dbf47",  # OSM blocked tile (browser UA)
+    "c069a15b2cc2d6b6f527ad09eb93c61a",  # OSM "Access blocked" tile
 }
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "data" / "tiles"
@@ -80,7 +115,14 @@ def download_tile(z, x, y, db_path, lock, stats):
                 continue
             with lock:
                 stats["errors"] += 1
-                if stats["errors"] <= 5:
+                stats["processed"] += 1
+                if stats["processed"] % 500 == 0:
+                    pct = stats["downloaded"] / stats["total"] * 100 if stats["total"] else 0
+                    elapsed = time.time() - stats["start"]
+                    rate = stats["processed"] / elapsed if elapsed > 0 else 0
+                    remaining = (stats["total"] - stats["downloaded"]) / rate if rate > 0 else 0
+                    print(f"  [{stats['downloaded']}/{stats['total']}] {pct:.1f}% | {rate:.1f} t/s | ETA {remaining:.0f}s | err:{stats['errors']}")
+                elif stats["errors"] <= 5:
                     print(f"  Error {url}: {e}")
             return
 
@@ -95,12 +137,13 @@ def download_tile(z, x, y, db_path, lock, stats):
 
     with lock:
         stats["downloaded"] += 1
-        if stats["downloaded"] % 200 == 0:
+        stats["processed"] += 1
+        if stats["processed"] % 500 == 0:
             pct = stats["downloaded"] / stats["total"] * 100 if stats["total"] else 0
             elapsed = time.time() - stats["start"]
-            rate = stats["downloaded"] / elapsed if elapsed > 0 else 0
+            rate = stats["processed"] / elapsed if elapsed > 0 else 0
             remaining = (stats["total"] - stats["downloaded"]) / rate if rate > 0 else 0
-            print(f"  [{stats['downloaded']}/{stats['total']}] {pct:.1f}% | {rate:.1f} tiles/s | ETA {remaining:.0f}s")
+            print(f"  [{stats['downloaded']}/{stats['total']}] {pct:.1f}% | {rate:.1f} t/s | ETA {remaining:.0f}s | err:{stats['errors']}")
 
 
 def main():
@@ -139,15 +182,6 @@ def main():
     conn.execute("INSERT OR REPLACE INTO metadata VALUES ('description', 'OSM tiles for offline use')")
     conn.commit()
 
-    # Load existing tile keys (no tile_data — avoids OOM on RPi)
-    existing_keys = set()
-    for row in conn.execute("SELECT zoom_level, tile_column, tile_row FROM tiles").fetchall():
-        existing_keys.add((row[0], row[1], row[2]))
-    conn.close()
-
-    total_existing = len(existing_keys)
-    print(f"Existing: {total_existing} tiles")
-
     # Estimate tiles per zoom
     zoom_tile_counts = {}
     total_tiles = 0
@@ -159,51 +193,71 @@ def main():
         print(f"  z{z}: x[{x_min}-{x_max}] y[{y_min}-{y_max}] = {n:,} tiles")
 
     print(f"\nTotal: {total_tiles:,} tiles, ~{total_tiles * 0.02:.0f} MB estimated")
-    print(f"Already in DB: {total_existing}")
 
-    stats = {"downloaded": 0, "errors": 0, "total": total_tiles - total_existing, "start": time.time()}
+    stats = {"downloaded": 0, "errors": 0, "processed": 0, "total": 0, "start": time.time()}
     lock = threading.Lock()
 
-    # Process one zoom level at a time to limit memory
-    overall_done = total_existing
+    conn = sqlite3.connect(str(out_db_path))
+
+    # Process one zoom level at a time
     for z in range(min_zoom, max_zoom + 1):
         x_min, x_max, y_min, y_max, tiles_at_z = zoom_tile_counts[z]
         print(f"\n--- Zoom {z} ({tiles_at_z:,} tiles) ---")
 
-        # Build tile list for this zoom only
-        zoom_tiles = []
-        for x in range(x_min, x_max + 1):
-            for y in range(y_min, y_max + 1):
-                tms_y = osm_to_tms(y, z)
-                if (z, x, tms_y) not in existing_keys:
-                    zoom_tiles.append((z, x, y))
+        # Load existing tile keys for this zoom
+        existing_z = set()
+        for row in conn.execute("SELECT tile_column, tile_row FROM tiles WHERE zoom_level=?", (z,)):
+            existing_z.add((row[0], row[1]))
 
-        if not zoom_tiles:
+        # Count total remaining tiles for this zoom (two passes to estimate max memory)
+        # First pass: count only (low memory, just accumulate ints)
+        Y_BAND = 50
+        band_counts = []  # (band_start, band_end, count)
+        for band_start in range(y_min, y_max + 1, Y_BAND):
+            band_end = min(band_start + Y_BAND - 1, y_max)
+            cnt = 0
+            for y in range(band_start, band_end + 1):
+                tms_y = osm_to_tms(y, z)
+                for x in range(x_min, x_max + 1):
+                    if (x, tms_y) not in existing_z:
+                        cnt += 1
+            if cnt > 0:
+                band_counts.append((band_start, band_end, cnt))
+
+        total_remaining = sum(c for _, _, c in band_counts)
+        if total_remaining == 0:
             print(f"  All {tiles_at_z:,} tiles already exist, skipping")
-            overall_done += tiles_at_z
+            del existing_z
             continue
 
-        print(f"  To download: {len(zoom_tiles):,} (skipping {tiles_at_z - len(zoom_tiles):,})")
+        stats["total"] += total_remaining
+        print(f"  To download: {total_remaining:,} (skipping {tiles_at_z - total_remaining:,})")
 
-        # Download in batches of 5000 to avoid huge memory
-        BATCH = 5000
-        for batch_start in range(0, len(zoom_tiles), BATCH):
-            batch = zoom_tiles[batch_start:batch_start + BATCH]
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-                futures = [pool.submit(download_tile, zz, xx, yy, str(out_db_path), lock, stats)
-                          for zz, xx, yy in batch]
-                for f in as_completed(futures):
-                    pass
+        # Second pass: download each band
+        for band_start, band_end, _ in band_counts:
+            band_tiles = []
+            for y in range(band_start, band_end + 1):
+                tms_y = osm_to_tms(y, z)
+                for x in range(x_min, x_max + 1):
+                    if (x, tms_y) not in existing_z:
+                        band_tiles.append((z, x, y))
 
-            overall_done += len(batch)
-            elapsed = time.time() - stats["start"]
-            if elapsed > 0:
-                rate = stats["downloaded"] / elapsed
-                remaining = (stats["total"] - stats["downloaded"]) / rate if rate > 0 else 0
-                print(f"  {stats['downloaded']}/{stats['total']} | {rate:.1f} t/s | ETA {remaining:.0f}s")
+            # Download this band
+            BATCH = 5000
+            for batch_start in range(0, len(band_tiles), BATCH):
+                batch = band_tiles[batch_start:batch_start + BATCH]
+                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+                    futures = [pool.submit(download_tile, zz, xx, yy, str(out_db_path), lock, stats)
+                              for zz, xx, yy in batch]
+                    for f in as_completed(futures):
+                        pass
 
-        # Free memory before next zoom
-        del zoom_tiles
+                # Progress from download_tile handles the display
+
+            del band_tiles
+
+        print(f"  Zoom {z} done. Downloaded {total_remaining:,} tiles.")
+        del existing_z
 
     # final count
     conn = sqlite3.connect(str(out_db_path))

@@ -286,6 +286,17 @@ function geoknigaScaleLabel(scale) {
   return { color: '#95a5a6', label: 'small' };
 }
 
+// Check if a file exists locally by making a HEAD request
+async function checkLocalFile(mapId, idx) {
+  try {
+    const r = await fetch('/api/geokniga-file/' + mapId + '/' + idx + '?check=1');
+    if (r.status === 200) return 'local';
+    return 'missing';
+  } catch(e) { return 'missing'; }
+}
+
+const FILE_TYPE_ICONS = { 'jpg': '🖼', 'jpeg': '🖼', 'png': '🖼', 'gif': '🖼', 'pdf': '📄', 'tif': '🖼', 'tiff': '🖼' };
+
 function geoknigaPopup(f) {
   const p = f.properties || {};
   const parts = [`<b>${p.title || '?'}</b>`];
@@ -300,25 +311,49 @@ function geoknigaPopup(f) {
     parts.push('<hr style="margin:6px 0"><div style="font-weight:600;margin-bottom:3px;font-size:12px">Файлы (' + p.files_count + '):</div>');
     const total = p.files_total_size;
     if (total) parts.push('<div style="font-size:11px;color:#888">Всего: ' + total + '</div>');
-    parts.push('<div style="max-height:180px;overflow-y:auto;font-size:12px">');
+    parts.push('<div style="max-height:200px;overflow-y:auto;font-size:12px">');
     files.forEach((f, i) => {
       const isImage = /^(jpg|jpeg|png|gif|tif|tiff)$/i.test(f.ext || '');
-      const isPdf = f.ext === 'pdf';
       const ext = f.ext ? f.ext.toUpperCase() : 'FILE';
+      const icon = FILE_TYPE_ICONS[f.ext] || '📎';
       const localPath = '/api/geokniga-file/' + p.id + '/' + i;
+      const remoteUrl = f.url;
+      // Always show file, use local if available, external otherwise
       if (isImage) {
-        parts.push('<div style="padding:2px 0"><span style="color:#999;font-size:10px">[' + ext + ']</span> <a href="#" onclick="showGeoknigaFile(' + p.id + ',' + i + ');return false">' + f.name + '</a> <span style="color:#888;font-size:11px">(' + f.size_str + ')</span></div>');
-      } else if (isPdf) {
-        parts.push('<div style="padding:2px 0"><span style="color:#999;font-size:10px">[PDF]</span> <a href="' + localPath + '" target="_blank">' + f.name + '</a> <span style="color:#888;font-size:11px">(' + f.size_str + ')</span></div>');
+        // Try local first, fall back to remote
+        parts.push('<div style="padding:2px 0">' + icon + ' <a href="#" onclick="tryOpenFile(' + p.id + ',' + i + ',\'' + remoteUrl.replace(/'/g, "\\'") + '\');return false">' + f.name + '</a> <span style="color:#888;font-size:11px">(' + f.size_str + ')</span></div>');
       } else {
-        parts.push('<div style="padding:2px 0"><span style="color:#999;font-size:10px">[' + ext + ']</span> <a href="' + localPath + '" target="_blank">' + f.name + '</a> <span style="color:#888;font-size:11px">(' + f.size_str + ')</span></div>');
+        // Non-image: link to local path, fallback to remote
+        parts.push('<div style="padding:2px 0">' + icon + ' <a href="' + localPath + '" target="_blank" onclick="if(this.href.indexOf(\'/api/geokniga-file/\')>=0){return tryOpenLocal(event,this,\'' + remoteUrl.replace(/'/g, "\\'") + '\')}">' + f.name + '</a> <span style="color:#888;font-size:11px">(' + f.size_str + ')</span></div>');
       }
     });
     parts.push('</div>');
   }
 
-  parts.push('<hr style="margin:4px 0"><a href="' + p.url + '" target="_blank" style="font-size:11px">Открыть на GeoKniga →</a>');
+  parts.push('<hr style="margin:4px 0"><a href="' + p.url + '" target="_blank" style="font-size:11px;color:#888">Открыть на GeoKniga →</a>');
   return parts.join('<br>');
+}
+
+// Try to open locally, fall back to remote URL
+function tryOpenLocal(event, el, remoteUrl) {
+  fetch(el.href + '?check=1').then(r => {
+    if (r.status !== 200) {
+      event.preventDefault();
+      window.open(remoteUrl, '_blank');
+    }
+  }).catch(() => {
+    event.preventDefault();
+    window.open(remoteUrl, '_blank');
+  });
+}
+
+async function tryOpenFile(mapId, idx, remoteUrl) {
+  const r = await fetch('/api/geokniga-file/' + mapId + '/' + idx + '?check=1');
+  if (r.status === 200) {
+    showGeoknigaFile(mapId, idx);
+  } else {
+    window.open(remoteUrl, '_blank');
+  }
 }
 
 const geoknigaLayer = L.geoJSON(null, {
