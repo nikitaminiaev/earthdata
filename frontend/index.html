@@ -127,6 +127,8 @@
   </div>
   <label><input type="checkbox" id="chk-geol" disabled onchange="geolLayer.setVisible(this.checked)"><span class="swatch" style="background:#888"></span>Geology (USGS)</label>
   <label><input type="checkbox" id="chk-gw" disabled onchange="gwLayer.setVisible(this.checked)"><span class="swatch" style="background:#66a"></span>Groundwater (IGRAC)</label>
+  <label title="Красный=уран (U), зелёный=калий (K), синий=торий (Th). Белый/циан=высокие концентрации. Чёрный=нет данных. Данные: USGS NArad, Северная Америка"><input type="checkbox" id="chk-nrad" onchange="nradLayer.setVisible(this.checked)"><span class="swatch" style="background:#e41a1c"></span>Radiometrics NArad (U-Th-K)</label>
+  <label title="Тернарная RGB-карта: красный=калий (K), зелёный=уран (U), синий=торий (Th). Яркие цвета=высокая активность. Данные: Geoscience Australia Radmap v4, 100м"><input type="checkbox" id="chk-aus-rad" onchange="ausRadLayer.setVisible(this.checked)"><span class="swatch" style="background:#ff7f00"></span>Australia Radmap</label>
   <hr style="margin:4px 0"/>
   <div style="font-weight:600;font-size:12px;color:#555;margin-bottom:2px">BASEMAP</div>
   <label><input type="radio" name="basemap" id="rb-online" onchange="setBasemap('online')"><span style="color:#888">🌐 Online</span></label>
@@ -153,6 +155,7 @@ const map = L.map('map', {
   zoom: 4,
   maxZoom: 14,
   minZoom: 2,
+  attributionControl: false,
 });
 
 console.log('Map created');
@@ -199,6 +202,13 @@ map.on('tileload', function(e) {
 const elevLayer = L.tileLayer('/api/tiles/{z}/{x}/{y}.png?layer=elevation', {
   maxZoom: 14, opacity: 0.55,
 }).addTo(map);
+
+const nradLayer = L.tileLayer('/api/tiles/{z}/{x}/{y}.png?layer=nrad_ccm', {
+  minZoom: 4, maxZoom: 14, opacity: 0.8, tileSize: 256,
+});
+const ausRadLayer = L.tileLayer('/api/tiles/{z}/{x}/{y}.png?layer=aus_ternary', {
+  minZoom: 6, maxZoom: 14, opacity: 0.8, tileSize: 256,
+});
 
 const mrdsLayer = L.geoJSON(null, {
   pointToLayer: (f, latlng) => L.circleMarker(latlng, {

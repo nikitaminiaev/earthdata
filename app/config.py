@@ -15,6 +15,10 @@ MRDS_GEOJSON = str(DATA / "vectors" / "mrds.geojson")
 # Geology (once conversion is complete)
 GEOLOGY_DB = str(DATA / "geology" / "earth_geology.sqlite")
 
+# Radiometrics (COG rasters)
+NRAD_CCM_COG = str(DATA / "radiometrics" / "NArad_CCM_cog.tif")
+AUS_TERNARY_COG = str(DATA / "radiometrics" / "australia" / "radmap_cog.tif")
+
 # MODIS land cover
 MODIS_DIR = str(ROOT / "07_landcover")
 

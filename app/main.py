@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
-from app.config import GEBCO_PATH, ASTER_VRT, VECTORS_DB, MRDS_GEOJSON, GEOLOGY_DB, OSM_MBTILES
+from app.config import GEBCO_PATH, ASTER_VRT, VECTORS_DB, MRDS_GEOJSON, GEOLOGY_DB, OSM_MBTILES, NRAD_CCM_COG, AUS_TERNARY_COG
 
 logger = logging.getLogger("earthdata")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -34,13 +34,62 @@ def spatial_conn(db_path: str):
     finally:
         conn.close()
 
-# ---- Utility: find best available data ----
+# ---- Preload data caches (loaded once at startup) ----
+
+_mrds_cache = None
+
+def _get_mrds():
+    global _mrds_cache
+    if _mrds_cache is None:
+        p = Path(MRDS_GEOJSON)
+        if p.exists():
+            with open(p) as f:
+                _mrds_cache = json.load(f)
+    return _mrds_cache
+
+_geojson_cache = {}
+
+def _get_geojson(name: str):
+    if name not in _geojson_cache:
+        p = VECS_DIR / f"{name}.geojson"
+        if p.exists():
+            _geojson_cache[name] = p.read_bytes()
+        else:
+            _geojson_cache[name] = None
+    return _geojson_cache[name]
+
+_catalog_cache = None
+_catalog_files_cache = None
+
+def _get_geokniga_catalog():
+    global _catalog_cache, _catalog_files_cache
+    files_p = VECS_DIR / "geokniga_catalog_files.geojson"
+    basic_p = VECS_DIR / "geokniga_catalog.geojson"
+    if files_p.exists():
+        if _catalog_files_cache is None:
+            with open(files_p) as f:
+                _catalog_files_cache = json.load(f)
+        return _catalog_files_cache
+    if _catalog_cache is None:
+        with open(basic_p) as f:
+            _catalog_cache = json.load(f)
+    return _catalog_cache
 
 def get_best_elevation_source():
     for p in [GEBCO_PATH, ASTER_VRT]:
         if Path(p).exists():
             return p
     return None
+
+RGB_RASTER_LAYERS = {
+    "nrad_ccm": NRAD_CCM_COG,
+    "aus_ternary": AUS_TERNARY_COG,
+}
+
+RGB_MIN_ZOOM = {
+    "nrad_ccm": 4,
+    "aus_ternary": 6,
+}
 
 # ---- Static frontend ----
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
@@ -101,19 +150,57 @@ urls.forEach(function(url) {
 
 @app.get("/api/tiles/{z}/{x}/{y}.png")
 async def tile(z: int, x: int, y: int, layer: str = Query("elevation")):
+    import mercantile
+    import rasterio
+    import numpy as np
+    from PIL import Image
+    import io
+
+    TILE_SIZE = 256
+    b = mercantile.bounds(x, y, z)
+
+    if layer in RGB_RASTER_LAYERS:
+        min_z = RGB_MIN_ZOOM.get(layer, 5)
+        if z < min_z:
+            return transparent_tile()
+
+        src_path = RGB_RASTER_LAYERS[layer]
+        if not Path(src_path).exists():
+            return Response(status_code=404)
+        try:
+            with rasterio.open(src_path) as src:
+                window = src.window(b.west, b.south, b.east, b.north)
+                if window.width < 1 or window.height < 1:
+                    return transparent_tile()
+                window = window.round_lengths().round_offsets()
+                window = rasterio.windows.Window(
+                    max(0, int(window.col_off)), max(0, int(window.row_off)),
+                    min(int(window.width), src.width), min(int(window.height), src.height),
+                )
+                if window.width == 0 or window.height == 0:
+                    return transparent_tile()
+                data = src.read(window=window, boundless=True, fill_value=0,
+                                out_shape=(src.count, TILE_SIZE, TILE_SIZE))
+                rgb = data[:3].transpose(1, 2, 0).astype(np.uint8)
+                mask = (rgb.sum(axis=2) == 0)
+                if mask.all():
+                    return transparent_tile()
+                rgba = np.zeros((TILE_SIZE, TILE_SIZE, 4), dtype=np.uint8)
+                rgba[:, :, :3] = rgb
+                rgba[:, :, 3] = (~mask).astype(np.uint8) * 255
+                img = Image.fromarray(rgba, mode="RGBA")
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                return Response(content=buf.getvalue(), media_type="image/png")
+        except Exception:
+            return transparent_tile()
+
     src_path = get_best_elevation_source()
     if not src_path:
         return Response(status_code=404)
 
-    import mercantile
-    import rasterio
-    import numpy as np
-
-    TILE_SIZE = 256
-
     try:
         with rasterio.open(src_path) as src:
-            b = mercantile.bounds(x, y, z)
             window = src.window(b.west, b.south, b.east, b.north)
 
             if window.width < 1 or window.height < 1:
@@ -136,13 +223,11 @@ async def tile(z: int, x: int, y: int, layer: str = Query("elevation")):
             norm = np.clip((data - np.nanmin(data)) / (np.nanmax(data) - np.nanmin(data) + 1e-10) * 255, 0, 255)
             norm = np.nan_to_num(norm, nan=0).astype(np.uint8)
 
-            from PIL import Image
             img = Image.fromarray(norm, mode="L")
             if width != TILE_SIZE or height != TILE_SIZE:
                 resample = Image.NEAREST if width < TILE_SIZE else Image.BILINEAR
                 img = img.resize((TILE_SIZE, TILE_SIZE), resample)
 
-            import io
             buf = io.BytesIO()
             img.save(buf, format="PNG")
             return Response(content=buf.getvalue(), media_type="image/png")
@@ -159,8 +244,8 @@ def tile_bounds(z, x, y):
 
 def tile_count():
     try:
-        conn = sqlite3.connect(OSM_MBTILES)
-        count = conn.execute("SELECT COUNT(*) FROM tiles").fetchone()[0]
+        conn = sqlite3.connect(OSM_MBTILES, timeout=5)
+        count = conn.execute("SELECT MAX(rowid) FROM tiles").fetchone()[0]
         conn.close()
         return count
     except Exception:
@@ -175,8 +260,27 @@ def empty_tile(color=0):
     img.save(buf, format="PNG")
     return Response(content=buf.getvalue(), media_type="image/png")
 
+def transparent_tile():
+    from PIL import Image
+    import io
+    img = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
+
 
 # ---- Offline OSM tile endpoint (from MBTiles) ----
+
+_osm_db = None
+
+def _get_osm_db():
+    global _osm_db
+    if _osm_db is None:
+        _osm_db = sqlite3.connect(OSM_MBTILES)
+        _osm_db.execute("PRAGMA query_only = 1")
+        _osm_db.execute("PRAGMA journal_mode = WAL")
+        _osm_db.execute("PRAGMA cache_size = -32000")
+    return _osm_db
 
 @app.get("/api/osm-tiles/{z}/{x}/{y}.png")
 async def osm_tile(z: int, x: int, y: int):
@@ -186,18 +290,14 @@ async def osm_tile(z: int, x: int, y: int):
     tms_y = (1 << z) - 1 - y
 
     try:
-        conn = sqlite3.connect(OSM_MBTILES)
-        conn.execute("PRAGMA query_only = 1")
+        conn = _get_osm_db()
         row = conn.execute(
             "SELECT tile_data FROM tiles WHERE zoom_level=? AND tile_column=? AND tile_row=?",
             (z, x, tms_y),
         ).fetchone()
-        conn.close()
         if row:
             return Response(content=row[0], media_type="image/png")
-        else:
-            logger.warning("osm_tile not in DB: z=%d x=%d y=%d tms_y=%d", z, x, y, tms_y)
-            return empty_tile(220)
+        return empty_tile(220)
     except Exception as e:
         logger.error("osm_tile error: %s", e)
         return empty_tile(220)
@@ -231,10 +331,9 @@ async def query_point(
         result["elevation_m"] = None
 
     # MRDS: nearest deposits
-    if Path(MRDS_GEOJSON).exists():
+    fc = _get_mrds()
+    if fc:
         try:
-            with open(MRDS_GEOJSON) as f:
-                fc = json.load(f)
             nearby = []
             for feat in fc["features"]:
                 lng, ltd = feat["geometry"]["coordinates"]
@@ -297,11 +396,9 @@ async def search_mineral(
     commodity: str = Query(...),
     limit: int = Query(50, le=500),
 ):
-    if not Path(MRDS_GEOJSON).exists():
+    fc = _get_mrds()
+    if fc is None:
         raise HTTPException(404, "MRDS data not available")
-
-    with open(MRDS_GEOJSON) as f:
-        fc = json.load(f)
 
     results = []
     for feat in fc["features"]:
@@ -357,11 +454,11 @@ async def groundwater_at_point(
 VECS_DIR = Path(__file__).resolve().parent.parent / "data" / "vectors"
 
 def serve_geojson(name: str):
-    p = VECS_DIR / f"{name}.geojson"
     async def _handler():
-        if not p.exists():
+        data = _get_geojson(name)
+        if data is None:
             raise HTTPException(404)
-        return Response(content=p.read_bytes(), media_type="application/geo+json")
+        return Response(content=data, media_type="application/geo+json")
     return _handler
 
 app.get("/api/mrds-layer")(serve_geojson("mrds"))
@@ -373,15 +470,11 @@ app.get("/api/gw-tba")(serve_geojson("gw_tba"))
 app.get("/api/osm-mining")(serve_geojson("osm_mining_enriched"))
 app.get("/api/rosnedra")(serve_geojson("rosnedra_plots"))
 def serve_geokniga_catalog():
-    """Serve enriched catalog (with file data) if available, fallback to basic."""
-    files_p = VECS_DIR / "geokniga_catalog_files.geojson"
-    basic_p = VECS_DIR / "geokniga_catalog.geojson"
-    target = files_p if files_p.exists() else basic_p
-
     async def _handler():
-        if not target.exists():
+        fc = _get_geokniga_catalog()
+        if fc is None:
             raise HTTPException(404)
-        return Response(content=target.read_bytes(), media_type="application/geo+json")
+        return Response(content=json.dumps(fc), media_type="application/geo+json")
     return _handler
 
 app.get("/api/geokniga-catalog")(serve_geokniga_catalog())
@@ -390,13 +483,9 @@ GEOKNIGA_FILES = Path(__file__).resolve().parent.parent / "data" / "geokniga_fil
 
 @app.get("/api/geokniga-file/{map_id}/{idx}")
 async def geokniga_file(map_id: int, idx: int, check: bool = False):
-    """Serve a single file for a GeoKniga map by index. ?check=1 returns 200/404 without body."""
-    catalog_path = VECS_DIR / "geokniga_catalog_files.geojson"
-    if not catalog_path.exists():
+    fc = _get_geokniga_catalog()
+    if fc is None:
         raise HTTPException(404, "No enriched catalog")
-
-    with open(catalog_path) as f:
-        fc = json.load(f)
 
     target_feat = None
     for feat in fc['features']:
@@ -451,6 +540,8 @@ async def health():
         "geology_db": Path(GEOLOGY_DB).exists(),
         "mrds_geojson": Path(MRDS_GEOJSON).exists(),
         "offline_tiles": Path(OSM_MBTILES).exists(),
+        "nrad_ccm": Path(NRAD_CCM_COG).exists(),
+        "aus_ternary": Path(AUS_TERNARY_COG).exists(),
         "tile_count": tile_count(),
         "tile_total_estimated": 141171,
     }
